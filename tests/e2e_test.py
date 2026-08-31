@@ -7,7 +7,10 @@ import sys
 
 import httpx
 
-BASE = "http://127.0.0.1:8649"
+import os
+
+# 默认打本机；MEM_TEST_BASE=https://repo.xlingo.fun 可对公网域名跑同一套断言
+BASE = os.environ.get("MEM_TEST_BASE", "http://127.0.0.1:8649").rstrip("/")
 FAIL = []
 
 

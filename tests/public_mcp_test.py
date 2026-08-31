@@ -1,14 +1,19 @@
-"""公网 MCP 实测：经 nginx 反代（https://utils.xlingo.fun/mem/mcp）跑完整 MCP 握手 + 工具调用。
+"""公网 MCP 实测：经 nginx 反代跑完整 MCP 握手 + 工具调用。
+
+默认打正式地址 https://repo.xlingo.fun/mcp/；
+MEM_MCP_URL=... 可覆盖（例如回归验证旧的 utils.xlingo.fun/mem/mcp 是否还通）。
 
 跑法：cd /opt/memorys && PYTHONPATH=/opt/memorys .venv/bin/python tests/public_mcp_test.py <API_KEY>
 """
 import asyncio
 import json
+import os
 import sys
+import time
 
 import httpx
 
-URL = "https://utils.xlingo.fun/mem/mcp"
+URL = os.environ.get("MEM_MCP_URL", "https://repo.xlingo.fun/mcp/")
 FAIL = []
 
 
@@ -70,8 +75,8 @@ async def main():
         st, res = await rpc("tools/call", {
             "name": "memory_write",
             "arguments": {
-                "title": "公网 MCP 链路验证",
-                "content": "经 nginx 反代 https://utils.xlingo.fun/mem/mcp 调用 MCP 工具写入成功。验证 DNS rebinding 白名单与 SSE 反代配置生效。",
+                "title": f"公网 MCP 链路验证 {int(time.time())}",
+                "content": f"经 nginx 反代 {URL} 调用 MCP 工具写入成功。验证 DNS rebinding 白名单与 SSE 反代配置生效。",
                 "type": "fact",
                 "project": "memorys",
                 "tags": ["mcp", "nginx"],
@@ -83,7 +88,15 @@ async def main():
             "name": "memory_search",
             "arguments": {"query": "公网 反代 验证", "limit": 5}})
         t = text_of(res or {})
-        check("公网 memory_search", st == 200 and "命中" in t, t.split("\n")[0][:90])
+        # 命中时返回 {"ok":true,"count":N,"results":[...]}；
+        # 「没有命中」这句话只在 0 命中时才出现，不能拿它当成功标志。
+        try:
+            sr = json.loads(t)
+        except Exception:
+            sr = {}
+        hit_titles = [(h.get("doc") or {}).get("title") for h in (sr.get("results") or [])]
+        check("公网 memory_search", st == 200 and sr.get("ok") and (sr.get("count") or 0) > 0,
+              f"count={sr.get('count')} {hit_titles[:3]}")
 
         st, res = await rpc("tools/call", {
             "name": "memory_bootstrap",

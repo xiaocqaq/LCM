@@ -243,7 +243,9 @@ async def doc_history(doc_id: int, ctx: AuthContext = Depends(auth), session: As
 async def search(q: str = "", limit: int = 10, mode: str = "hybrid", library: str | None = None, project: str | None = None,
                  ctx: AuthContext = Depends(auth), session: AsyncSession = Depends(get_session)):
     if not q.strip():
-        return {"results": [], "mode": mode, "query": q}
+        # 直接返回 200 空结果会掩盖"参数名拼错"这类调用错误（比如误传 query= 而非 q=），
+        # 调用方看到的是"库里没有"，实际是请求本身没带上查询词。
+        raise HTTPException(400, detail="缺少查询词：请用 ?q=... 传检索内容")
     results = None
     if mode in ("hybrid", "semantic"):
         results = await service.semantic_search(session, ctx.user, q, limit)
@@ -270,9 +272,9 @@ async def sync(payload: dict | None = None, ctx: AuthContext = Depends(auth), se
     root = user_root(settings.data_dir, ctx.user.id)
     pulled = None
     if action == "pull":
-        import subprocess
-        p = subprocess.run(["git", "-C", str(root), "pull", "--ff-only"], capture_output=True, text=True, timeout=60)
-        pulled = {"ok": p.returncode == 0, "output": (p.stdout + p.stderr).strip()[:300]}
+        # 走 gitsvc：远端和分支都是按用户算的，裸 git pull 不知道该拉哪个分支
+        from . import gitsvc
+        pulled = gitsvc.pull_from_github(root, ctx.user.id)
     stats = await service.sync_from_disk(session, ctx.user)
     return {"pulled": pulled, **stats}
 
@@ -281,7 +283,7 @@ async def sync(payload: dict | None = None, ctx: AuthContext = Depends(auth), se
 async def sync_push(ctx: AuthContext = Depends(auth)):
     from . import gitsvc
     root = user_root(settings.data_dir, ctx.user.id)
-    return gitsvc.sync_to_github(root)
+    return gitsvc.sync_to_github(root, ctx.user.id)
 
 
 # ---------- 健康检查 ----------
@@ -295,6 +297,28 @@ async def health():
 from .mcp_app import mcp_asgi_app  # noqa: E402
 
 app.mount("/mcp", mcp_asgi_app)
+
+
+class McpSlashMiddleware:
+    """Starlette 的 Mount("/mcp") 只匹配 /mcp/...，裸 POST /mcp 会被 redirect_slashes
+    回 307。MCP 客户端普遍不跟重定向（跟了也会丢 POST body），所以在进路由前
+    把 /mcp 改写成 /mcp/，让客户端两种写法都能直连。
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") == "http" and scope.get("path") == "/mcp":
+            scope = dict(scope)
+            scope["path"] = "/mcp/"
+            raw = scope.get("raw_path")
+            if raw is not None:
+                scope["raw_path"] = raw + b"/"
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(McpSlashMiddleware)
 
 # 静态资源（Web UI）
 if STATIC_DIR.exists():

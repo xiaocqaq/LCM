@@ -221,10 +221,10 @@ code.key{background:#0d1320;border:1px solid var(--line);padding:3px 8px;border-
     <section id="v-mcp" class="hidden">
       <div class="card col">
         <h3>把知识库挂到 AI agent</h3>
-        <div class="muted">先在「API Key」页创建一个 Key，然后按下面配置。9 个工具：memory_search / memory_get / memory_write / memory_update / memory_delete / memory_bootstrap / memory_list_libraries / memory_list_docs / memory_history。</div>
+        <div class="muted">先在「API Key」页创建一个 Key，然后按下面配置。10 个工具：memory_search / memory_get / memory_write / memory_update / memory_delete / memory_restore / memory_bootstrap / memory_list_libraries / memory_list_docs / memory_history。</div>
         <div class="muted" style="margin-top:8px">Claude Desktop / Cursor（HTTP 方式）：</div>
         <pre class="out" id="mcpcfg"></pre>
-        <div class="muted">Hermes / 其他支持 streamable HTTP 的客户端：URL = <code class="key" id="mcpurl"></code>，鉴权头 <code class="key">X-Api-Key: mk_***</code></div>
+        <div class="muted">Hermes / 其他支持 streamable HTTP 的客户端：URL = <code class="key" id="mcpurl"></code>，鉴权头 <code class="key">X-Api-Key: hk_***</code></div>
       </div>
       <div class="card col">
         <h3>REST API</h3>
@@ -430,9 +430,9 @@ async function loadBootstrap(){
   try{
     const d = await api('/api/v1/bootstrap?token_budget='+b+(p?'&project='+encodeURIComponent(p):''));
     $('#bmeta').innerHTML=`<div class="card"><div class="row" style="gap:18px;flex-wrap:wrap">
-      <span>项目 <b>${H(d.project)}</b></span><span class="muted">选中 ${d.document_count}/${d.total_documents} 篇</span>
+      <span>范围 <b>${H(d.scope_label || d.project || 'main 库全部')}</b></span><span class="muted">选中 ${d.document_count}/${d.total_documents} 篇</span>
       <span class="muted">约 ${d.estimated_tokens} tokens（预算 ${d.token_budget}）</span></div></div>`;
-    S.boot = '# 记忆上下文（项目：'+d.project+'）\n\n'+d.documents.map(x=>
+    S.boot = '# 记忆上下文（'+(d.scope_label || ('项目：'+d.project))+'）\n\n'+d.documents.map(x=>
       `## [${x.type}] ${x.title}${x.project?' · 项目 '+x.project:''}${(x.tags||[]).length?' · 标签 '+x.tags.join(','):''}\n${x.content}${x.truncated?'\n…（已截断）':''}`
     ).join('\n\n---\n\n');
     $('#bout').textContent = S.boot || '（这个项目还没有记忆）';

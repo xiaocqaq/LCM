@@ -58,29 +58,94 @@ def history(root: Path, rel_path: str, limit: int = 20) -> list[dict]:
     return rows
 
 
-def ensure_remote(root: Path) -> str | None:
-    if not settings.github_remote:
+def remote_for(user_id: int) -> str | None:
+    """每用户的远端地址。
+
+    MEM_GITHUB_REMOTE 支持 {uid} 占位符：
+      git@github.com:me/memorys-u{uid}.git  → 每个用户一个独立仓库
+      git@github.com:me/memorys-data.git    → 共用一个仓库，靠分支隔离（见 branch_for）
+    """
+    tpl = (settings.github_remote or "").strip()
+    if not tpl:
         return None
-    remotes = _git(root, "remote", check=False)
-    if settings.github_remote not in remotes:
-        if "origin" in remotes:
-            _git(root, "remote", "set-url", "origin", settings.github_remote)
-        else:
-            _git(root, "remote", "add", "origin", settings.github_remote)
-    return settings.github_remote
+    return tpl.replace("{uid}", str(user_id))
 
 
-def sync_to_github(root: Path) -> dict:
-    """commit + push。远端仓库不存在时会返回错误信息（需先在 GitHub 建库）。"""
+def branch_for(user_id: int) -> str:
+    """每用户的备份分支。
+
+    远端模板里带 {uid}（一人一仓）时，直接用 sync_branch；
+    否则多用户共用一个仓库，必须按 u<uid> 分支隔离，否则会互相覆盖。
+    """
+    if "{uid}" in (settings.github_remote or ""):
+        return settings.sync_branch
+    return f"u{user_id}"
+
+
+def ensure_remote(root: Path, user_id: int) -> str | None:
+    url = remote_for(user_id)
+    if not url:
+        return None
+    remotes = _git(root, "remote", check=False).split()
+    if "origin" in remotes:
+        current = _git(root, "remote", "get-url", "origin", check=False)
+        if current != url:
+            _git(root, "remote", "set-url", "origin", url)
+    else:
+        _git(root, "remote", "add", "origin", url)
+    return url
+
+
+def sync_to_github(root: Path, user_id: int) -> dict:
+    """commit + push 到该用户自己的远端分支。
+
+    远端仓库不存在时返回错误信息（需先在 GitHub 建库），不抛异常。
+    """
+    url = remote_for(user_id)
+    if not url:
+        return {"ok": False, "error": "未配置 MEM_GITHUB_REMOTE，无法推送。"}
+    branch = branch_for(user_id)
     try:
-        ensure_remote(root)
+        ensure_remote(root, user_id)
         commit_all(root, "sync: backup to github")
+        # 本地分支名可能是 main（ensure_repo 用 sync_branch 建的），
+        # 推送时显式写成 HEAD:<branch>，保证落到该用户自己的远端分支
         p = subprocess.run(
-            ["git", "-C", str(root), "push", "-u", "origin", settings.sync_branch],
-            capture_output=True, text=True, timeout=90,
+            ["git", "-C", str(root), "push", "-u", "origin", f"HEAD:refs/heads/{branch}"],
+            capture_output=True, text=True, timeout=120,
         )
         if p.returncode != 0:
-            return {"ok": False, "error": (p.stderr or "").strip()[-400:]}
-        return {"ok": True, "branch": settings.sync_branch}
+            err = (p.stderr or "").strip()[-400:]
+            out = {"ok": False, "remote": url, "branch": branch, "error": err}
+            if "Repository not found" in err or "does not exist" in err:
+                out["hint"] = (
+                    f"远端仓库还不存在。先在 GitHub 建一个私有空仓库（名字对上 {url}），"
+                    "建好后再点一次推送即可；SSH 免密本机已配好，无需额外授权。"
+                )
+            elif "Permission denied" in err or "publickey" in err:
+                out["hint"] = "SSH 认证失败：确认本机 ~/.ssh 私钥已加到 GitHub 账号。"
+            return out
+        return {"ok": True, "remote": url, "branch": branch,
+                "message": f"已推送到 {url} 分支 {branch}"}
     except Exception as e:
-        return {"ok": False, "error": str(e)[:400]}
+        return {"ok": False, "remote": url, "branch": branch, "error": str(e)[:400]}
+
+
+def pull_from_github(root: Path, user_id: int) -> dict:
+    """从远端拉取（用于换机/灾恢）。冲突时不自动合并，返回错误让人工处理。"""
+    url = remote_for(user_id)
+    if not url:
+        return {"ok": False, "error": "未配置 MEM_GITHUB_REMOTE。"}
+    branch = branch_for(user_id)
+    try:
+        ensure_remote(root, user_id)
+        p = subprocess.run(
+            ["git", "-C", str(root), "pull", "--ff-only", "origin", branch],
+            capture_output=True, text=True, timeout=120,
+        )
+        if p.returncode != 0:
+            return {"ok": False, "remote": url, "branch": branch,
+                    "error": (p.stderr or "").strip()[-400:]}
+        return {"ok": True, "remote": url, "branch": branch, "output": p.stdout.strip()[-400:]}
+    except Exception as e:
+        return {"ok": False, "remote": url, "branch": branch, "error": str(e)[:400]}

@@ -19,7 +19,7 @@ from .mdstore import (
     user_root,
 )
 from .models import Chunk, Document, User
-from .search import embed_texts, tokenize, to_tsquery
+from .search import embed_texts, expand_tokens, to_tsquery
 
 
 def _now():
@@ -27,11 +27,15 @@ def _now():
 
 
 def _tsvector_literal(content: str) -> str:
-    words = tokenize(f"{content}")
+    """索引侧词串：走 expand_tokens（含路径段 + 概念同义词），空格分隔喂给 to_tsvector。
+
+    注意用空格而不是 '|'：这里的产物是 to_tsvector 的输入（普通文本），
+    不是 tsquery。用 '|' 会让管道符本身变成 lexeme。
+    """
+    words = expand_tokens(f"{content}")
     if not words:
-        return "''"
-    # 全部 OR 组合；词根用原文（中文无词干）
-    return "'" + " | ".join(w.replace("'", "") for w in words) + "'"
+        return ""
+    return " ".join(w.replace("'", "") for w in words)
 
 
 async def upsert_user_from_xiaoai(session: AsyncSession, u: dict) -> User:
@@ -413,7 +417,11 @@ async def bootstrap_context(session: AsyncSession, user: User, project: str | No
         used += cost
     digest_parts = [f"[{e['type']}] {e['title']}: {e['content'][:200]}" for e in picked[:20]]
     return {
-        "project": project or "main",
+        # project 留空时是「main 库全部」，不能把库名回填成项目名，否则
+        # 调用方会以为存在一个叫 main 的项目。scope 明确区分两种范围。
+        "project": project or "",
+        "scope": f"project:{project}" if project else "library:main",
+        "scope_label": f"项目 {project}" if project else "main 库全部",
         "token_budget": token_budget,
         "estimated_tokens": used,
         "document_count": len(picked),

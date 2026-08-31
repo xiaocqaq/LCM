@@ -24,6 +24,13 @@ async def upstream_login(username: str, password: str) -> dict:
         raise UpstreamAuthError("upstream_error", f"认证上游不可达: {e}", status=502)
     if resp.status_code == 401:
         raise UpstreamAuthError("invalid_credentials", "用户名或密码错误")
+    if resp.status_code == 400:
+        # 上游字段校验失败（如密码短于 6 位）。透传上游提示，别报成 502 误导用户。
+        try:
+            msg = (resp.json() or {}).get("errorMsg") or "请求参数不合法"
+        except Exception:
+            msg = "请求参数不合法"
+        raise UpstreamAuthError("invalid_request", msg, status=400)
     if resp.status_code != 200:
         raise UpstreamAuthError("upstream_error", f"上游返回 {resp.status_code}", status=502)
     body = resp.json()

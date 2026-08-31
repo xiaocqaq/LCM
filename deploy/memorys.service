@@ -1,5 +1,5 @@
 [Unit]
-Description=memorys — 跨会话 AI 知识库（REST + MCP + Web UI）
+Description=memorys — AI 跨会话知识库（REST + MCP + Web UI）
 After=network-online.target
 Wants=network-online.target
 
@@ -8,16 +8,16 @@ Type=simple
 WorkingDirectory=/opt/memorys
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONPATH=/opt/memorys
-ExecStart=/opt/memorys/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8649 --proxy-headers --forwarded-allow-ips 127.0.0.1
+# uvicorn 单 worker：MCP 的 session_manager 与 contextvar 认证是进程内状态，
+# 多 worker 会让 MCP 会话在 worker 间漂移。要扩容改用 nginx 上游多实例 + 独立端口。
+ExecStart=/opt/memorys/.venv/bin/python -m uvicorn app.main:app \
+    --host 127.0.0.1 --port 8649 \
+    --proxy-headers --forwarded-allow-ips 127.0.0.1 \
+    --log-level info
 Restart=always
 RestartSec=3
-
-# 数据目录（md + git 仓库）必须可写
+# md 文件与 git 仓库都在 DATA_DIR 下，服务需要写权限
 ReadWritePaths=/var/lib/memorys
-ProtectSystem=full
-PrivateTmp=yes
-NoNewPrivileges=yes
-
 StandardOutput=append:/var/log/memorys.log
 StandardError=append:/var/log/memorys.log
 

@@ -91,15 +91,25 @@ async def authenticate_headers(authorization: str | None, api_key: str | None, s
         # 2) xiaoai token（无 iss）
         try:
             claims = _decode(token, require_issuer=False)
-            if claims.get("token_type") == "access" and claims.get("user_id") is not None:
-                user = (
-                    await session.execute(select(User).where(User.xiaoai_user_id == int(claims["user_id"])))
-                ).scalar_one_or_none()
-                if user:
-                    return AuthContext(user=user, via="jwt-xiaoai")
-                raise HTTPException(401, "该 ai.xlingo.fun 账号尚未绑定知识库，请先用账号密码登录一次完成绑定")
         except pyjwt.PyJWTError:
-            pass
+            claims = None
+        if claims and claims.get("token_type") == "access" and claims.get("user_id") is not None:
+            user = (
+                await session.execute(select(User).where(User.xiaoai_user_id == int(claims["user_id"])))
+            ).scalar_one_or_none()
+            if user:
+                return AuthContext(user=user, via="jwt-xiaoai")
+            # 首次带 ai.xlingo.fun 的 token 过来：验签已过，说明 token 确实是上游签的，
+            # 但签名有效不等于会话还在（可能已登出/被吊销），所以回调上游 /me 复核，
+            # 通过后直接开户，避免逼用户再去 Web UI 用密码登录一次。
+            from . import service
+            from .upstream import UpstreamAuthError, upstream_me
+            try:
+                profile = await upstream_me(token)
+            except UpstreamAuthError as e:
+                raise HTTPException(e.status, f"上游校验未通过：{e.message}")
+            new_user = await service.upsert_user_from_xiaoai(session, profile)
+            return AuthContext(user=new_user, via="jwt-xiaoai")
         raise HTTPException(401, "登录已过期或 token 无效")
 
     raise HTTPException(401, "未认证：请带 Authorization: Bearer <token> 或 X-API-Key")

@@ -36,11 +36,26 @@ async def _send_401(send, msg: str) -> None:
     await send({"type": "http.response.body", "body": body})
 
 
+def _normalize(scope):
+    """FastAPI mount 会把 /mcp 前缀剥掉，POST /mcp 到内层就成了空路径，
+    内层 streamable_http_path="/" 于是回 307 重定向到 /mcp/。
+    MCP 客户端一般不跟重定向（且 POST 跟随会丢 body），所以这里直接补成 "/"。
+    """
+    if not scope.get("path"):
+        scope = dict(scope)
+        scope["path"] = "/"
+        raw = scope.get("raw_path")
+        if raw is not None and not raw.endswith(b"/"):
+            scope["raw_path"] = raw + b"/"
+    return scope
+
+
 async def mcp_asgi_app(scope, receive, send):
     if scope["type"] != "http":
         await _inner(scope, receive, send)
         return
 
+    scope = _normalize(scope)
     h = _headers(scope)
     try:
         async with SessionLocal() as s:
