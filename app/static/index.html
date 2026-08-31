@@ -1,0 +1,500 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>memorys · AI 知识库</title>
+<style>
+:root{
+  --bg:#0b0f1a; --panel:#121826; --panel2:#1a2234; --line:#26304a;
+  --text:#e6ebf5; --dim:#8b96ad; --accent:#5b8cff; --accent2:#22c78a;
+  --warn:#f2a33c; --danger:#ef5b6b; --radius:14px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{background:var(--bg);color:var(--text);font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+button{font:inherit;cursor:pointer;border:0;border-radius:10px;padding:8px 14px;background:var(--panel2);color:var(--text);border:1px solid var(--line)}
+button:hover{border-color:var(--accent)}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+button.ghost{background:transparent}
+button.danger{background:transparent;border-color:#5a2a33;color:var(--danger)}
+input,select,textarea{font:inherit;background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:10px;padding:9px 12px;width:100%}
+textarea{resize:vertical;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;line-height:1.7}
+a{color:var(--accent);text-decoration:none}
+.hidden{display:none!important}
+.row{display:flex;gap:10px;align-items:center}
+.col{display:flex;flex-direction:column;gap:10px}
+.muted{color:var(--dim)}
+.tag{display:inline-block;padding:1px 8px;border-radius:999px;background:#1e2740;color:#9fb2d8;font-size:12px;border:1px solid var(--line)}
+.badge{font-size:11px;padding:1px 7px;border-radius:6px;border:1px solid var(--line);color:var(--dim)}
+
+/* 登录 */
+#login{height:100%;display:flex;align-items:center;justify-content:center}
+#login .card{width:380px;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:28px}
+#login h1{margin:0 0 4px;font-size:22px}
+
+/* 主框架 */
+#appview{height:100%;display:grid;grid-template-columns:250px 1fr;grid-template-rows:56px 1fr}
+header{grid-column:1/3;display:flex;align-items:center;justify-content:space-between;padding:0 16px;border-bottom:1px solid var(--line);background:var(--panel)}
+aside{border-right:1px solid var(--line);padding:14px;overflow:auto;background:#0e1421}
+main{overflow:auto;padding:18px}
+.brand{font-weight:700;letter-spacing:.5px}
+.brand span{color:var(--accent)}
+.navitem{padding:8px 10px;border-radius:9px;cursor:pointer;color:var(--dim)}
+.navitem:hover{background:var(--panel2);color:var(--text)}
+.navitem.on{background:var(--panel2);color:var(--text);border-left:2px solid var(--accent)}
+.sec{margin:16px 0 6px;font-size:11px;letter-spacing:1px;color:#5f6b85;text-transform:uppercase}
+
+/* 列表 */
+.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:14px;margin-bottom:12px}
+.card h3{margin:0 0 6px;font-size:15px}
+.doc{cursor:pointer}
+.doc:hover{border-color:var(--accent)}
+.snippet{color:#b9c4da;background:#0d1320;border:1px solid var(--line);border-radius:10px;padding:10px;white-space:pre-wrap;max-height:120px;overflow:hidden;font-size:13px}
+.toolbar{display:flex;gap:8px;align-items:center;margin-bottom:14px;flex-wrap:wrap}
+.toolbar input{flex:1;min-width:200px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.kv{display:grid;grid-template-columns:110px 1fr;gap:8px;align-items:center}
+pre.out{background:#0d1320;border:1px solid var(--line);border-radius:10px;padding:12px;white-space:pre-wrap;max-height:420px;overflow:auto;font-size:12.5px}
+.toast{position:fixed;right:18px;bottom:18px;background:var(--panel2);border:1px solid var(--line);border-left:3px solid var(--accent2);padding:10px 14px;border-radius:10px;box-shadow:0 8px 30px #0008;z-index:99}
+.toast.err{border-left-color:var(--danger)}
+table{width:100%;border-collapse:collapse}
+th,td{text-align:left;padding:8px;border-bottom:1px solid var(--line);font-size:13px}
+th{color:var(--dim);font-weight:500}
+code.key{background:#0d1320;border:1px solid var(--line);padding:3px 8px;border-radius:8px;font-size:12px;word-break:break-all}
+</style>
+</head>
+<body>
+
+<!-- 登录 -->
+<div id="login">
+  <div class="card col">
+    <h1>memorys</h1>
+    <div class="muted" style="margin-bottom:10px">跨会话 AI 知识库 · 复用 ai.xlingo.fun 账号</div>
+    <input id="u" placeholder="用户名" autocomplete="username">
+    <input id="p" type="password" placeholder="密码" autocomplete="current-password">
+    <button class="primary" onclick="doLogin()">登录</button>
+    <div class="muted" style="font-size:12px">账号密码走 ai.xlingo.fun 校验，本站只存用户标识，不存密码。</div>
+    <div id="lerr" class="muted" style="color:var(--danger)"></div>
+  </div>
+</div>
+
+<!-- 主界面 -->
+<div id="appview" class="hidden">
+  <header>
+    <div class="brand">memory<span>s</span></div>
+    <div class="row">
+      <span class="muted" id="who"></span>
+      <button class="ghost" onclick="logout()">退出</button>
+    </div>
+  </header>
+
+  <aside>
+    <div class="sec">记忆</div>
+    <div class="navitem on" data-v="search" onclick="nav('search')">🔍 检索</div>
+    <div class="navitem" data-v="list" onclick="nav('list')">📚 全部文档</div>
+    <div class="navitem" data-v="edit" onclick="newDoc()">✏️ 新建记忆</div>
+    <div class="navitem" data-v="bootstrap" onclick="nav('bootstrap')">🚀 上下文引导包</div>
+    <div class="sec">管理</div>
+    <div class="navitem" data-v="trash" onclick="nav('trash')">🗑 回收站</div>
+    <div class="navitem" data-v="keys" onclick="nav('keys')">🔑 API Key</div>
+    <div class="navitem" data-v="sync" onclick="nav('sync')">☁️ 同步 / GitHub</div>
+    <div class="sec">接入</div>
+    <div class="navitem" data-v="mcp" onclick="nav('mcp')">🔌 MCP 配置</div>
+    <div class="sec">库</div>
+    <div id="libs" class="col" style="gap:4px"></div>
+  </aside>
+
+  <main>
+    <!-- 检索 -->
+    <section id="v-search">
+      <div class="toolbar">
+        <input id="q" placeholder="问点什么…（中文可直接问，如「xspeak 怎么发版」）" onkeydown="if(event.key==='Enter')doSearch()">
+        <select id="slib" style="width:150px"><option value="">全部库</option></select>
+        <button class="primary" onclick="doSearch()">检索</button>
+      </div>
+      <div id="sres"></div>
+    </section>
+
+    <!-- 列表 -->
+    <section id="v-list" class="hidden">
+      <div class="toolbar">
+        <input id="lq" placeholder="按标题过滤…" onkeydown="if(event.key==='Enter')loadList()">
+        <select id="ltype" style="width:160px" onchange="loadList()">
+          <option value="">全部类型</option>
+          <option value="project_summary">项目总结</option>
+          <option value="decision">决策</option>
+          <option value="preference">偏好</option>
+          <option value="howto">操作步骤</option>
+          <option value="glossary">术语</option>
+          <option value="fact">事实</option>
+        </select>
+        <button onclick="loadList()">刷新</button>
+        <button class="primary" onclick="newDoc()">新建</button>
+      </div>
+      <div id="lres"></div>
+    </section>
+
+    <!-- 编辑 -->
+    <section id="v-edit" class="hidden">
+      <div class="toolbar">
+        <button class="ghost" onclick="nav('list')">← 返回</button>
+        <span id="etitle" class="muted"></span>
+        <span style="flex:1"></span>
+        <button id="ehist" class="ghost hidden" onclick="showHistory()">版本历史</button>
+        <button id="edel" class="danger hidden" onclick="delDoc()">删除</button>
+        <button class="primary" onclick="saveDoc()">保存</button>
+      </div>
+      <div class="card col">
+        <div class="kv"><label>标题</label><input id="f-title" placeholder="例：xspeak 项目架构总结"></div>
+        <div class="kv"><label>类型</label>
+          <select id="f-type">
+            <option value="project_summary">project_summary · 项目总结</option>
+            <option value="decision">decision · 决策</option>
+            <option value="preference">preference · 用户偏好</option>
+            <option value="howto">howto · 操作步骤</option>
+            <option value="glossary">glossary · 术语</option>
+            <option value="fact" selected>fact · 事实</option>
+          </select>
+        </div>
+        <div class="grid2">
+          <div class="kv"><label>库</label><input id="f-library" value="main"></div>
+          <div class="kv"><label>项目</label><input id="f-project" placeholder="xspeak"></div>
+        </div>
+        <div class="grid2">
+          <div class="kv"><label>标签</label><input id="f-tags" placeholder="逗号分隔：nextjs, deploy"></div>
+          <div class="kv"><label>重要度</label><input id="f-importance" type="number" min="1" max="5" value="3"></div>
+        </div>
+        <div class="kv" style="align-items:start"><label>正文 (Markdown)</label>
+          <textarea id="f-content" rows="18" placeholder="# 小标题&#10;&#10;正文按标题层级自动切 chunk 建索引。"></textarea>
+        </div>
+      </div>
+      <div id="hist"></div>
+    </section>
+
+    <!-- bootstrap -->
+    <section id="v-bootstrap" class="hidden">
+      <div class="toolbar">
+        <input id="bproj" placeholder="项目名（留空 = main 库全部）" style="max-width:280px">
+        <input id="bbudget" type="number" value="4000" style="max-width:130px" title="token 预算">
+        <button class="primary" onclick="loadBootstrap()">生成</button>
+        <button class="ghost" onclick="copyBootstrap()">复制</button>
+      </div>
+      <div class="muted" style="margin-bottom:10px">换模型/换 agent 时，把这段塞进新会话开场，即可恢复上下文。</div>
+      <div id="bmeta"></div>
+      <pre class="out" id="bout"></pre>
+    </section>
+
+    <!-- 回收站 -->
+    <section id="v-trash" class="hidden">
+      <div class="toolbar"><button onclick="loadTrash()">刷新</button><span class="muted">删除是软删除，md 文件移到 .trash 且 git 有记录，可恢复。</span></div>
+      <div id="tres"></div>
+    </section>
+
+    <!-- API Key -->
+    <section id="v-keys" class="hidden">
+      <div class="toolbar">
+        <input id="kname" placeholder="Key 名称，如 claude-desktop" style="max-width:260px">
+        <button class="primary" onclick="createKey()">创建 Key</button>
+      </div>
+      <div id="knew"></div>
+      <div class="card"><table><thead><tr><th>名称</th><th>前缀</th><th>创建</th><th>最近使用</th><th></th></tr></thead><tbody id="kbody"></tbody></table></div>
+    </section>
+
+    <!-- 同步 -->
+    <section id="v-sync" class="hidden">
+      <div class="card col">
+        <h3>磁盘 → 数据库 重建索引</h3>
+        <div class="muted">直接改过 md 文件、或从别处 git pull 之后，用这个重建检索索引。</div>
+        <div class="row"><button class="primary" onclick="doSync('reindex')">重建索引</button>
+        <button onclick="doSync('pull')">git pull 后重建</button></div>
+      </div>
+      <div class="card col">
+        <h3>推送到 GitHub（长期备份）</h3>
+        <div class="muted">需先在服务器 .env 配置 GITHUB_REMOTE（git@github.com:xxx/xxx.git）。</div>
+        <button class="primary" onclick="doPush()">立即推送</button>
+      </div>
+      <pre class="out" id="syncout"></pre>
+    </section>
+
+    <!-- MCP -->
+    <section id="v-mcp" class="hidden">
+      <div class="card col">
+        <h3>把知识库挂到 AI agent</h3>
+        <div class="muted">先在「API Key」页创建一个 Key，然后按下面配置。9 个工具：memory_search / memory_get / memory_write / memory_update / memory_delete / memory_bootstrap / memory_list_libraries / memory_list_docs / memory_history。</div>
+        <div class="muted" style="margin-top:8px">Claude Desktop / Cursor（HTTP 方式）：</div>
+        <pre class="out" id="mcpcfg"></pre>
+        <div class="muted">Hermes / 其他支持 streamable HTTP 的客户端：URL = <code class="key" id="mcpurl"></code>，鉴权头 <code class="key">X-Api-Key: mk_***</code></div>
+      </div>
+      <div class="card col">
+        <h3>REST API</h3>
+        <div class="muted">交互式文档：<a href="/api/docs" target="_blank">/api/docs</a></div>
+        <pre class="out">curl -H "X-Api-Key: mk_***" "BASE/api/v1/search?q=xspeak"
+curl -H "X-Api-Key: mk_***" "BASE/api/v1/bootstrap?project=xspeak&token_budget=4000"
+curl -X POST -H "X-Api-Key: mk_***" -H "Content-Type: application/json" \
+  -d '{"title":"标题","type":"fact","content":"正文","project":"xspeak"}' BASE/api/v1/documents</pre>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script>
+const S = {token:localStorage.getItem('mem_token')||'', user:null, doc:null, boot:''};
+const $ = s=>document.querySelector(s);
+const H = s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+function toast(msg, err){
+  const d=document.createElement('div'); d.className='toast'+(err?' err':''); d.textContent=msg;
+  document.body.appendChild(d); setTimeout(()=>d.remove(), 2600);
+}
+async function api(path, opt={}){
+  const h = Object.assign({'Content-Type':'application/json'}, opt.headers||{});
+  if(S.token) h['Authorization']='Bearer '+S.token;
+  const r = await fetch(path, Object.assign({}, opt, {headers:h}));
+  if(r.status===401){ logout(); throw new Error('登录已过期'); }
+  const txt = await r.text();
+  let data=null; try{ data = txt?JSON.parse(txt):null; }catch(e){ data={detail:txt}; }
+  if(!r.ok) throw new Error((data&&(data.detail||data.error))||('HTTP '+r.status));
+  return data;
+}
+
+/* 登录 */
+async function doLogin(){
+  const u=$('#u').value.trim(), p=$('#p').value;
+  if(!u||!p){ $('#lerr').textContent='请输入账号密码'; return; }
+  $('#lerr').textContent='验证中…';
+  try{
+    const d = await api('/api/v1/auth/ai-login',{method:'POST',body:JSON.stringify({username:u,password:p})});
+    S.token=d.accessToken; localStorage.setItem('mem_token',S.token);
+    await boot();
+  }catch(e){ $('#lerr').textContent=e.message; }
+}
+function logout(){
+  S.token=''; localStorage.removeItem('mem_token');
+  $('#appview').classList.add('hidden'); $('#login').classList.remove('hidden');
+}
+async function boot(){
+  try{
+    const me = await api('/api/v1/auth/me');
+    S.user=me;
+    $('#who').textContent = (me.displayName||me.username)+' · '+me.username;
+    $('#login').classList.add('hidden'); $('#appview').classList.remove('hidden');
+    $('#mcpurl').textContent = location.origin+'/mcp';
+    $('#mcpcfg').textContent = JSON.stringify({mcpServers:{memorys:{type:"http",url:location.origin+"/mcp",headers:{"X-Api-Key":"mk_你的key"}}}},null,2);
+    $('#v-mcp').querySelectorAll('pre.out').forEach(p=>p.textContent=p.textContent.replaceAll('BASE',location.origin));
+    await loadLibs(); nav('search');
+  }catch(e){ logout(); }
+}
+
+/* 导航 */
+function nav(v){
+  ['search','list','edit','bootstrap','trash','keys','sync','mcp'].forEach(x=>{
+    $('#v-'+x).classList.toggle('hidden', x!==v);
+  });
+  document.querySelectorAll('.navitem').forEach(n=>n.classList.toggle('on', n.dataset.v===v));
+  if(v==='list') loadList();
+  if(v==='trash') loadTrash();
+  if(v==='keys') loadKeys();
+}
+
+async function loadLibs(){
+  try{
+    const d = await api('/api/v1/documents?limit=200');
+    const libs = [...new Set(d.items.map(i=>i.library))];
+    $('#libs').innerHTML = libs.length? libs.map(l=>`<div class="navitem" onclick="filterLib('${H(l)}')">📁 ${H(l)}</div>`).join('') : '<div class="muted" style="font-size:12px">还没有记忆</div>';
+    $('#slib').innerHTML = '<option value="">全部库</option>'+libs.map(l=>`<option>${H(l)}</option>`).join('');
+  }catch(e){}
+}
+function filterLib(l){ nav('list'); $('#lq').value=''; loadList(l); }
+
+/* 检索 */
+async function doSearch(){
+  const q=$('#q').value.trim(); if(!q) return;
+  $('#sres').innerHTML='<div class="muted">检索中…</div>';
+  try{
+    const lib=$('#slib').value;
+    const d = await api('/api/v1/search?q='+encodeURIComponent(q)+'&limit=12'+(lib?'&library='+encodeURIComponent(lib):''));
+    if(!d.results.length){ $('#sres').innerHTML='<div class="card muted">没有命中。换个说法，或先去「全部文档」看看库里有什么。</div>'; return; }
+    $('#sres').innerHTML = `<div class="muted" style="margin-bottom:10px">模式 ${d.mode} · ${d.results.length} 条</div>`+
+      d.results.map(r=>`<div class="card doc" onclick="openDoc(${r.doc.id})">
+        <h3>${H(r.doc.title)} <span class="badge">${H(r.doc.type)}</span> <span class="badge">score ${r.score}</span></h3>
+        <div class="muted" style="font-size:12px;margin-bottom:8px">
+          ${r.doc.project?'项目 '+H(r.doc.project)+' · ':''}库 ${H(r.doc.library)} · 重要度 ${r.doc.importance}
+          ${(r.doc.tags||[]).map(t=>' <span class="tag">'+H(t)+'</span>').join('')}
+        </div>
+        ${r.heading?`<div class="muted" style="font-size:12px">章节：${H(r.heading)}</div>`:''}
+        <div class="snippet">${H(r.content.slice(0,400))}</div>
+      </div>`).join('');
+  }catch(e){ toast(e.message,1); $('#sres').innerHTML=''; }
+}
+
+/* 列表 */
+async function loadList(lib){
+  const q=$('#lq').value.trim(), t=$('#ltype').value;
+  let url='/api/v1/documents?limit=200';
+  if(q) url+='&q='+encodeURIComponent(q);
+  if(t) url+='&type='+t;
+  if(lib) url+='&library='+encodeURIComponent(lib);
+  try{
+    const d = await api(url);
+    $('#lres').innerHTML = d.items.length? d.items.map(i=>`<div class="card doc" onclick="openDoc(${i.id})">
+      <h3>${H(i.title)} <span class="badge">${H(i.type)}</span></h3>
+      <div class="muted" style="font-size:12px">
+        ${i.project?'项目 '+H(i.project)+' · ':''}库 ${H(i.library)} · 重要度 ${i.importance} · 更新 ${H((i.updatedAt||'').slice(0,16).replace('T',' '))}
+        ${(i.tags||[]).map(x=>' <span class="tag">'+H(x)+'</span>').join('')}
+      </div></div>`).join('') : '<div class="card muted">这个筛选下没有文档。</div>';
+  }catch(e){ toast(e.message,1); }
+}
+
+/* 编辑 */
+function newDoc(){
+  S.doc=null; nav('edit');
+  $('#etitle').textContent='新建记忆';
+  $('#ehist').classList.add('hidden'); $('#edel').classList.add('hidden');
+  $('#hist').innerHTML='';
+  ['title','project','tags','content'].forEach(k=>$('#f-'+k).value='');
+  $('#f-library').value='main'; $('#f-importance').value=3; $('#f-type').value='fact';
+}
+async function openDoc(id){
+  try{
+    const d = await api('/api/v1/documents/'+id);
+    S.doc=d; nav('edit');
+    $('#etitle').textContent='mem'+d.id;
+    $('#ehist').classList.remove('hidden'); $('#edel').classList.remove('hidden');
+    $('#hist').innerHTML='';
+    $('#f-title').value=d.title; $('#f-type').value=d.type; $('#f-library').value=d.library;
+    $('#f-project').value=d.project||''; $('#f-tags').value=(d.tags||[]).join(', ');
+    $('#f-importance').value=d.importance; $('#f-content').value=d.content||'';
+  }catch(e){ toast(e.message,1); }
+}
+function formPayload(){
+  return {
+    title:$('#f-title').value.trim(), type:$('#f-type').value,
+    library:$('#f-library').value.trim()||'main', project:$('#f-project').value.trim(),
+    tags:$('#f-tags').value.split(',').map(s=>s.trim()).filter(Boolean),
+    importance:+$('#f-importance').value||3, content:$('#f-content').value,
+    source:'web:'+(S.user?S.user.username:'')
+  };
+}
+async function saveDoc(){
+  const p=formPayload();
+  if(!p.title||!p.content){ toast('标题和正文都要填',1); return; }
+  try{
+    if(S.doc){
+      const d = await api('/api/v1/documents/'+S.doc.id,{method:'PATCH',body:JSON.stringify(p)});
+      S.doc=d; toast('已保存 mem'+d.id);
+    }else{
+      const d = await api('/api/v1/documents',{method:'POST',body:JSON.stringify(p)});
+      S.doc=d; $('#etitle').textContent='mem'+d.id;
+      $('#ehist').classList.remove('hidden'); $('#edel').classList.remove('hidden');
+      toast('已创建 mem'+d.id);
+    }
+    loadLibs();
+  }catch(e){
+    if(e.message.includes('已存在')) toast('已有同标题文档，改个标题或去列表里编辑那一篇',1);
+    else toast(e.message,1);
+  }
+}
+async function delDoc(){
+  if(!S.doc||!confirm('移到回收站？md 文件会进 .trash，git 留记录，可恢复。')) return;
+  try{ await api('/api/v1/documents/'+S.doc.id,{method:'DELETE'}); toast('已移到回收站'); nav('list'); loadLibs(); }
+  catch(e){ toast(e.message,1); }
+}
+async function showHistory(){
+  try{
+    const h = await api('/api/v1/documents/'+S.doc.id+'/history');
+    $('#hist').innerHTML = '<div class="card"><h3>版本历史（git）</h3>'+
+      (h.length? '<table><thead><tr><th>提交</th><th>时间</th><th>说明</th></tr></thead><tbody>'+
+      h.map(c=>`<tr><td><code class="key">${H(c.hash)}</code></td><td class="muted">${H(c.date.slice(0,19))}</td><td>${H(c.message)}</td></tr>`).join('')+'</tbody></table>'
+      : '<div class="muted">暂无提交记录</div>')+'</div>';
+  }catch(e){ toast(e.message,1); }
+}
+
+/* bootstrap */
+async function loadBootstrap(){
+  const p=$('#bproj').value.trim(), b=+$('#bbudget').value||4000;
+  $('#bout').textContent='生成中…';
+  try{
+    const d = await api('/api/v1/bootstrap?token_budget='+b+(p?'&project='+encodeURIComponent(p):''));
+    $('#bmeta').innerHTML=`<div class="card"><div class="row" style="gap:18px;flex-wrap:wrap">
+      <span>项目 <b>${H(d.project)}</b></span><span class="muted">选中 ${d.document_count}/${d.total_documents} 篇</span>
+      <span class="muted">约 ${d.estimated_tokens} tokens（预算 ${d.token_budget}）</span></div></div>`;
+    S.boot = '# 记忆上下文（项目：'+d.project+'）\n\n'+d.documents.map(x=>
+      `## [${x.type}] ${x.title}${x.project?' · 项目 '+x.project:''}${(x.tags||[]).length?' · 标签 '+x.tags.join(','):''}\n${x.content}${x.truncated?'\n…（已截断）':''}`
+    ).join('\n\n---\n\n');
+    $('#bout').textContent = S.boot || '（这个项目还没有记忆）';
+  }catch(e){ toast(e.message,1); $('#bout').textContent=''; }
+}
+function copyBootstrap(){
+  if(!S.boot){ toast('先点生成',1); return; }
+  navigator.clipboard.writeText(S.boot).then(()=>toast('已复制，粘到新会话开场即可'));
+}
+
+/* 回收站 */
+async function loadTrash(){
+  try{
+    const d = await api('/api/v1/documents?trash=true&limit=200');
+    $('#tres').innerHTML = d.items.length? d.items.map(i=>`<div class="card">
+      <div class="row"><div style="flex:1">
+        <h3>${H(i.title)} <span class="badge">${H(i.type)}</span></h3>
+        <div class="muted" style="font-size:12px">库 ${H(i.library)} · 删除于 ${H((i.updatedAt||'').slice(0,16).replace('T',' '))}</div>
+      </div><button class="primary" onclick="restore(${i.id})">恢复</button></div></div>`).join('')
+      : '<div class="card muted">回收站是空的。</div>';
+  }catch(e){ toast(e.message,1); }
+}
+async function restore(id){
+  try{ await api('/api/v1/documents/'+id+'/restore',{method:'POST'}); toast('已恢复'); loadTrash(); loadLibs(); }
+  catch(e){ toast(e.message,1); }
+}
+
+/* API Key */
+async function loadKeys(){
+  try{
+    const ks = await api('/api/v1/keys');
+    $('#kbody').innerHTML = ks.length? ks.map(k=>`<tr>
+      <td>${H(k.name)}</td><td><code class="key">${H(k.prefix)}…</code></td>
+      <td class="muted">${H((k.createdAt||'').slice(0,16).replace('T',' '))}</td>
+      <td class="muted">${k.lastUsedAt?H(k.lastUsedAt.slice(0,16).replace('T',' ')):'未使用'}</td>
+      <td><button class="danger" onclick="revokeKey(${k.id})">吊销</button></td></tr>`).join('')
+      : '<tr><td colspan="5" class="muted">还没有 Key。创建一个给 agent 用。</td></tr>';
+  }catch(e){ toast(e.message,1); }
+}
+async function createKey(){
+  const name=$('#kname').value.trim()||'default';
+  try{
+    const k = await api('/api/v1/keys',{method:'POST',body:JSON.stringify({name})});
+    $('#knew').innerHTML=`<div class="card" style="border-color:var(--accent2)">
+      <h3>Key 已创建：${H(k.name)}</h3>
+      <div class="muted" style="margin-bottom:8px">只显示这一次，请立刻复制保存。</div>
+      <code class="key">${H(k.key)}</code>
+      <div style="margin-top:10px"><button onclick="navigator.clipboard.writeText('${H(k.key)}').then(()=>toast('已复制'))">复制</button></div></div>`;
+    $('#kname').value=''; loadKeys();
+  }catch(e){ toast(e.message,1); }
+}
+async function revokeKey(id){
+  if(!confirm('吊销这个 Key？用它接入的 agent 会立刻失效。')) return;
+  try{ await api('/api/v1/keys/'+id,{method:'DELETE'}); toast('已吊销'); loadKeys(); }
+  catch(e){ toast(e.message,1); }
+}
+
+/* 同步 */
+async function doSync(action){
+  $('#syncout').textContent='执行中…';
+  try{
+    const d = await api('/api/v1/sync',{method:'POST',body:JSON.stringify({action})});
+    $('#syncout').textContent=JSON.stringify(d,null,2); toast('同步完成'); loadLibs();
+  }catch(e){ $('#syncout').textContent=e.message; toast(e.message,1); }
+}
+async function doPush(){
+  $('#syncout').textContent='推送中…';
+  try{
+    const d = await api('/api/v1/sync/push',{method:'POST'});
+    $('#syncout').textContent=JSON.stringify(d,null,2);
+    toast(d.ok?'已推送到 GitHub':'推送失败，看输出', !d.ok);
+  }catch(e){ $('#syncout').textContent=e.message; toast(e.message,1); }
+}
+
+if(S.token) boot();
+</script>
+</body>
+</html>
