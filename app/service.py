@@ -310,7 +310,22 @@ async def search_chunks(session: AsyncSession, user: User, q: str, limit: int = 
             e = rrf.setdefault(r[0], {"row": r, "score": 0.0})
             e["score"] += 1.0 / (60 + rank + 1)
             doc_ids.add(r[1])
-    merged = sorted(rrf.values(), key=lambda e: -e["score"])[:limit]
+    # 每篇文档最多占 PER_DOC_CAP 条：否则一篇长文档的多个 chunk 会吃满整个结果集，
+    # agent 拿去恢复上下文时等于白烧 token。凑不满 limit 时再放宽补齐。
+    PER_DOC_CAP = 2
+    ranked = sorted(rrf.values(), key=lambda e: -e["score"])
+    merged, spill, per_doc = [], [], {}
+    for e in ranked:
+        did = e["row"][1]
+        if per_doc.get(did, 0) < PER_DOC_CAP:
+            per_doc[did] = per_doc.get(did, 0) + 1
+            merged.append(e)
+        else:
+            spill.append(e)
+        if len(merged) >= limit:
+            break
+    if len(merged) < limit:
+        merged.extend(spill[: limit - len(merged)])
     if not merged:
         return []
     docs = {d.id: d for d in (await session.execute(select(Document).where(Document.id.in_(list(doc_ids))))).scalars()}

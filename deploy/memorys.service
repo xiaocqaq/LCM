@@ -1,0 +1,25 @@
+[Unit]
+Description=memorys — 跨会话 AI 知识库（REST + MCP + Web UI）
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/memorys
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/opt/memorys
+ExecStart=/opt/memorys/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8649 --proxy-headers --forwarded-allow-ips 127.0.0.1
+Restart=always
+RestartSec=3
+
+# 数据目录（md + git 仓库）必须可写
+ReadWritePaths=/var/lib/memorys
+ProtectSystem=full
+PrivateTmp=yes
+NoNewPrivileges=yes
+
+StandardOutput=append:/var/log/memorys.log
+StandardError=append:/var/log/memorys.log
+
+[Install]
+WantedBy=multi-user.target

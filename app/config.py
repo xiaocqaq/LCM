@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     embed_dim: int = 1536
     app_host: str = "127.0.0.1"
     app_port: int = 8649
+    # MCP 的 DNS rebinding 防护白名单。后端只听 127.0.0.1，FastMCP 会据此自动只放行
+    # 本机 Host；经 nginx 反代进来的 Host 是真实域名，必须在这里显式放行，否则 421。
+    # 逗号分隔，支持 host:* 通配。
+    mcp_allowed_hosts: str = "127.0.0.1:*,localhost:*,[::1]:*,utils.xlingo.fun,mem.xlingo.fun"
 
     model_config = {"env_file": "/opt/memorys/.env", "env_prefix": "MEM_", "extra": "ignore"}
 

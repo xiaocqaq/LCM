@@ -247,10 +247,18 @@ function toast(msg, err){
   const d=document.createElement('div'); d.className='toast'+(err?' err':''); d.textContent=msg;
   document.body.appendChild(d); setTimeout(()=>d.remove(), 2600);
 }
+/* 站点前缀：直接挂域名根时为 ''，挂在 utils.xlingo.fun/mem/ 这类子路径时自动得到 '/mem'。
+   nginx 反代已把 /mem/ 前缀 strip 掉，所以前端必须自己加回来，否则请求会打到宿主站。 */
+const BASE = (function(){
+  const m = location.pathname.match(/^(\/[^\/]+)\//);
+  // 只认已知子路径，避免 /login 之类的路径被误判成前缀
+  return (m && m[1] === '/mem') ? '/mem' : '';
+})();
+
 async function api(path, opt={}){
   const h = Object.assign({'Content-Type':'application/json'}, opt.headers||{});
   if(S.token) h['Authorization']='Bearer '+S.token;
-  const r = await fetch(path, Object.assign({}, opt, {headers:h}));
+  const r = await fetch(BASE + path, Object.assign({}, opt, {headers:h}));
   if(r.status===401){ logout(); throw new Error('登录已过期'); }
   const txt = await r.text();
   let data=null; try{ data = txt?JSON.parse(txt):null; }catch(e){ data={detail:txt}; }

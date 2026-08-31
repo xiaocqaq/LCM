@@ -9,6 +9,7 @@ import contextvars
 import json
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from sqlalchemy import select
 
 from . import gitsvc, service
@@ -22,7 +23,19 @@ current_auth: contextvars.ContextVar = contextvars.ContextVar("current_auth", de
 
 # streamable_http_path="/"：本 app 会被挂到 FastAPI 的 /mcp，内层再加前缀会变成 /mcp/mcp
 # stateless_http=True：每个请求独立，多 agent 并发挂载时不必维持会话
-mcp = FastMCP("memorys", streamable_http_path="/", stateless_http=True)
+# transport_security：FastMCP 见 host=127.0.0.1 会自动只放行本机 Host，
+#   经 nginx 反代进来的真实域名会被判成 DNS rebinding 而返回 421，故显式配白名单。
+_allowed = [h.strip() for h in settings.mcp_allowed_hosts.split(",") if h.strip()]
+mcp = FastMCP(
+    "memorys",
+    streamable_http_path="/",
+    stateless_http=True,
+    transport_security=TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=_allowed,
+        allowed_origins=[f"https://{h}" for h in _allowed] + [f"http://{h}" for h in _allowed],
+    ),
+)
 
 
 class NotAuthenticated(Exception):
