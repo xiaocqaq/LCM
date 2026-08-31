@@ -20,7 +20,9 @@ from .models import Document
 # 当前请求的认证上下文（由 mcp_app 中间件设置）
 current_auth: contextvars.ContextVar = contextvars.ContextVar("current_auth", default=None)
 
-mcp = FastMCP("memorys")
+# streamable_http_path="/"：本 app 会被挂到 FastAPI 的 /mcp，内层再加前缀会变成 /mcp/mcp
+# stateless_http=True：每个请求独立，多 agent 并发挂载时不必维持会话
+mcp = FastMCP("memorys", streamable_http_path="/", stateless_http=True)
 
 
 class NotAuthenticated(Exception):

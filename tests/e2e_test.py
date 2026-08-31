@@ -31,7 +31,7 @@ async def mk_user(username: str, uid_hint: int):
         u = (await s.execute(select(User).where(User.username == username))).scalar_one_or_none()
         if not u:
             u = User(username=username, display_name=username, xiaoai_user_id=uid_hint,
-                     public_id=f"test{uid_hint}", role="user", status="active")
+                     email=f"{username}@example.local", role="user")
             s.add(u)
             await s.commit()
         gitsvc.ensure_repo(settings.data_dir, u.id)
@@ -55,9 +55,37 @@ DOCS = [
 ]
 
 
+async def reset(uids: list[int]):
+    """清掉测试用户的历史数据，保证 e2e 可重复跑。"""
+    import shutil
+    from pathlib import Path
+
+    from sqlalchemy import text as sqltext
+
+    from app.config import settings
+    from app.db import SessionLocal
+
+    async with SessionLocal() as s:
+        await s.execute(sqltext(
+            "DELETE FROM chunks WHERE document_id IN "
+            "(SELECT id FROM documents WHERE user_id = ANY(:u))"), {"u": uids})
+        await s.execute(sqltext("DELETE FROM documents WHERE user_id = ANY(:u)"), {"u": uids})
+        await s.execute(sqltext("DELETE FROM api_keys WHERE user_id = ANY(:u)"), {"u": uids})
+        await s.commit()
+    for uid in uids:
+        p = Path(settings.data_dir) / "users" / f"u{uid}"
+        if p.exists():
+            shutil.rmtree(p)
+
+
 async def main():
     token, uid = await mk_user("memtest", 999001)
     token2, uid2 = await mk_user("memtest2", 999002)
+    await reset([uid, uid2])
+    from app import gitsvc
+    from app.config import settings
+    gitsvc.ensure_repo(settings.data_dir, uid)
+    gitsvc.ensure_repo(settings.data_dir, uid2)
 
     async with httpx.AsyncClient(base_url=BASE, timeout=30,
                                  headers={"Authorization": f"Bearer {token}"}) as c:
@@ -137,7 +165,7 @@ async def main():
         # ---- API Key ----
         r = await c.post("/api/v1/keys", json={"name": "e2e"})
         raw = r.json().get("key", "") if r.status_code == 200 else ""
-        check("创建 API Key", raw.startswith("mk_"), raw[:12] + "…")
+        check("创建 API Key", raw.startswith("hk_"), raw[:12] + "…")
 
         # ---- 磁盘同步 ----
         r = await c.post("/api/v1/sync", json={"action": "reindex"})
@@ -146,7 +174,7 @@ async def main():
     # ---- API Key 独立鉴权 ----
     async with httpx.AsyncClient(base_url=BASE, timeout=30, headers={"X-Api-Key": raw}) as ck:
         r = await ck.get("/api/v1/auth/me")
-        check("API Key 鉴权", r.status_code == 200 and r.json()["via"] == "api_key", r.text[:120])
+        check("API Key 鉴权", r.status_code == 200 and r.json()["via"] == "api-key", r.text[:120])
         r = await ck.get("/api/v1/search", params={"q": "xspeak"})
         check("API Key 可检索", r.status_code == 200 and len(r.json()["results"]) > 0)
 

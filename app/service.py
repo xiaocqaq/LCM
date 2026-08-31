@@ -85,10 +85,23 @@ async def create_document(session: AsyncSession, user: User, payload: dict) -> D
     if dup:
         raise DuplicateError(dup)
 
+    # slug 去重：DB 已占用的 rel_path（含软删除行，唯一索引不区分）+ 磁盘现存文件都要避开
+    taken = set(
+        (
+            await session.execute(
+                select(Document.rel_path).where(
+                    Document.user_id == user.id, Document.library == library
+                )
+            )
+        ).scalars()
+    )
     base = sanitize_slug(title)
     slug = base
     i = 1
-    while doc_path(settings.data_dir, user.id, library, slug).exists():
+    while (
+        f"{library}/{slug}.md" in taken
+        or doc_path(settings.data_dir, user.id, library, slug).exists()
+    ):
         i += 1
         slug = f"{base}-{i}"
 
