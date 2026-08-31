@@ -20,6 +20,11 @@ class Settings(BaseSettings):
     embed_dim: int = 1536
     app_host: str = "127.0.0.1"
     app_port: int = 8649
+    # 反代挂载前缀。nginx 把 /mem/ strip 掉后转发到本服务，本服务自身路由不含前缀，
+    # 但 /api/docs 页面内引用的 openapi.json 是绝对路径，必须靠 root_path 加回前缀，
+    # 否则 Swagger UI 会去宿主站根目录取 openapi.json 而 404。
+    # 直接挂域名根（如 mem.xlingo.fun）时置空。
+    root_path: str = "/mem"
     # MCP 的 DNS rebinding 防护白名单。后端只听 127.0.0.1，FastMCP 会据此自动只放行
     # 本机 Host；经 nginx 反代进来的 Host 是真实域名，必须在这里显式放行，否则 421。
     # 逗号分隔，支持 host:* 通配。

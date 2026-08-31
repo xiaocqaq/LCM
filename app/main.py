@@ -47,7 +47,27 @@ async def lifespan(app: FastAPI):
     await engine.dispose()
 
 
-app = FastAPI(title="memorys", version="1.0.0", lifespan=lifespan, docs_url="/api/docs", openapi_url="/api/openapi.json")
+# 不要用 root_path：它会让 Starlette 的 mount 匹配也带上前缀，
+# 而 nginx 已经把 /mem 剥掉了，结果 /mcp 挂载点直接 404。
+# docs 页面引用 openapi.json 的绝对路径问题，用下面的自定义 /api/docs 路由解决。
+app = FastAPI(
+    title="memorys",
+    version="1.0.0",
+    lifespan=lifespan,
+    docs_url=None,
+    openapi_url="/api/openapi.json",
+)
+
+
+@app.get("/api/docs", include_in_schema=False)
+async def swagger_docs():
+    """自定义 docs：openapi.json 的 URL 要带上反代前缀，否则子路径部署下取不到。"""
+    from fastapi.openapi.docs import get_swagger_ui_html
+
+    return get_swagger_ui_html(
+        openapi_url=f"{settings.root_path}/api/openapi.json",
+        title="memorys API",
+    )
 
 
 # ---------- 认证 ----------

@@ -228,7 +228,7 @@ code.key{background:#0d1320;border:1px solid var(--line);padding:3px 8px;border-
       </div>
       <div class="card col">
         <h3>REST API</h3>
-        <div class="muted">交互式文档：<a href="/api/docs" target="_blank">/api/docs</a></div>
+        <div class="muted">交互式文档：<a href="/api/docs" target="_blank" id="docslink">/api/docs</a></div>
         <pre class="out">curl -H "X-Api-Key: mk_***" "BASE/api/v1/search?q=xspeak"
 curl -H "X-Api-Key: mk_***" "BASE/api/v1/bootstrap?project=xspeak&token_budget=4000"
 curl -X POST -H "X-Api-Key: mk_***" -H "Content-Type: application/json" \
@@ -287,9 +287,14 @@ async function boot(){
     S.user=me;
     $('#who').textContent = (me.displayName||me.username)+' · '+me.username;
     $('#login').classList.add('hidden'); $('#appview').classList.remove('hidden');
-    $('#mcpurl').textContent = location.origin+'/mcp';
-    $('#mcpcfg').textContent = JSON.stringify({mcpServers:{memorys:{type:"http",url:location.origin+"/mcp",headers:{"X-Api-Key":"mk_你的key"}}}},null,2);
-    $('#v-mcp').querySelectorAll('pre.out').forEach(p=>p.textContent=p.textContent.replaceAll('BASE',location.origin));
+    const MCPURL = location.origin + BASE + '/mcp';
+    $('#mcpurl').textContent = MCPURL;
+    $('#mcpcfg').textContent = JSON.stringify({mcpServers:{memorys:{type:"http",url:MCPURL,headers:{"X-Api-Key":"hk_你的key"}}}},null,2);
+    // 注意要带上 BASE 前缀：挂在 /mem 子路径时 location.origin 不含前缀，
+    // 直接替换会给出打不通的 curl 示例
+    const ROOT = location.origin + BASE;
+    $('#v-mcp').querySelectorAll('pre.out').forEach(p=>p.textContent=p.textContent.replaceAll('BASE',ROOT));
+    const dl = $('#docslink'); if(dl){ dl.href = BASE + '/api/docs'; dl.textContent = BASE + '/api/docs'; }
     await loadLibs(); nav('search');
   }catch(e){ logout(); }
 }
