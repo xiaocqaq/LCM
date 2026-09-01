@@ -190,7 +190,14 @@ async def list_documents(ctx: AuthContext = Depends(auth), session: AsyncSession
 
 
 @app.post("/api/v1/documents")
-async def create_document(payload: dict, ctx: AuthContext = Depends(auth), session: AsyncSession = Depends(get_session)):
+async def create_document(payload: dict, branch: str = "", ctx: AuthContext = Depends(auth), session: AsyncSession = Depends(get_session)):
+    # branch 为空或等于当前分支 → 走正常路径（落盘 + 进 DB + 建索引）
+    # 指定了别的分支 → 只往 git 对象库提交，不动工作区也不进 DB
+    if branch:
+        try:
+            return await service.write_to_branch(session, ctx.user, payload, branch)
+        except ValueError as e:
+            raise HTTPException(400, detail=str(e))
     try:
         doc = await service.create_document(session, ctx.user, payload)
     except service.DuplicateError as e:
@@ -205,8 +212,14 @@ async def get_document(doc_id: int, ctx: AuthContext = Depends(auth), session: A
 
 
 @app.patch("/api/v1/documents/{doc_id}")
-async def patch_document(doc_id: int, payload: dict, ctx: AuthContext = Depends(auth), session: AsyncSession = Depends(get_session)):
+async def patch_document(doc_id: int, payload: dict, branch: str = "", ctx: AuthContext = Depends(auth), session: AsyncSession = Depends(get_session)):
     d = await _get_doc(ctx, session, doc_id)
+    # 指定别的分支 = "另存到该分支"：原文档在当前分支保持不动
+    if branch:
+        try:
+            return await service.write_to_branch(session, ctx.user, payload, branch, doc=d)
+        except ValueError as e:
+            raise HTTPException(400, detail=str(e))
     try:
         d = await service.update_document(session, ctx.user, d, payload, expected_hash=payload.get("expectedHash"))
     except service.ConflictError as e:

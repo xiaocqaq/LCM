@@ -1,5 +1,6 @@
 """核心业务：文档 CRUD（md 为准、DB 索引）、检索（关键词+trgm+RRF 混合）、bootstrap。"""
 import re
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -109,7 +110,6 @@ async def create_document(session: AsyncSession, user: User, payload: dict) -> D
         i += 1
         slug = f"{base}-{i}"
 
-    import uuid
     doc = Document(
         user_id=user.id,
         library=library,
@@ -205,6 +205,72 @@ async def update_document(session: AsyncSession, user: User, doc: Document, payl
     await session.commit()
     gitsvc.try_commit_all(root, f"update: {doc.title}")
     return doc
+
+
+async def write_to_branch(session: AsyncSession, user: User, payload: dict,
+                          branch: str, doc: Document | None = None) -> dict:
+    """把记忆写到**非当前分支**，不落盘、不进 DB。
+
+    为什么不落盘也不进 DB：PG 索引和磁盘 md 都是"当前分支"的平铺视图。
+    往别的分支写内容如果同时落到磁盘，工作区就变成了两个分支的混合体；
+    如果同时进 DB，检索会返回当前分支上根本不存在的文档。
+    所以这里只往 git 对象库提交，等用户切到那个分支（或合并过来）时，
+    reindex 自然会把它纳入索引。
+
+    doc 非空时是"另存到分支"：以该文档的路径和元数据为基础，套用 payload 的改动。
+    """
+    root = gitsvc.ensure_repo(settings.data_dir, user.id)
+    cur = gitsvc.current_branch(root)
+    if branch == cur:
+        raise ValueError("目标分支就是当前分支，直接正常保存即可")
+
+    title = (payload.get("title") or (doc.title if doc else "") or "untitled").strip()[:256]
+    content = (payload.get("content") or (doc.content if doc else "") or "").strip()
+    if not content:
+        raise ValueError("content 不能为空")
+    library = sanitize_slug(payload.get("library") or (doc.library if doc else "main"))
+    md_type = payload.get("type") if payload.get("type") in VALID_TYPES else (doc.md_type if doc else "fact")
+    project = (payload.get("project") or (doc.project if doc else "") or "").strip()[:128]
+    tags = [str(t)[:32] for t in (payload.get("tags") or (doc.tags if doc else []) or [])][:16]
+    importance = max(1, min(5, int(payload.get("importance") or (doc.importance if doc else 3))))
+    source = (payload.get("source") or "web")[:64]
+
+    # 改标题时路径跟着变，否则沿用原路径（等于在该分支上更新同一篇）
+    slug = sanitize_slug(title)
+    rel_path = f"{library}/{slug}.md"
+
+    # 目标分支上已有同路径文件 → 这次是更新，保留它原本的 created_at
+    existing = gitsvc.read_file_from_branch(root, branch, rel_path)
+    created_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if existing:
+        try:
+            old_meta, _ = parse_document(existing)
+            created_at = old_meta.get("created_at") or created_at
+        except Exception:
+            pass
+
+    meta = {
+        "id": f"mem_{uuid.uuid4().hex[:12]}",
+        "title": title,
+        "type": md_type,
+        "project": project,
+        "tags": tags,
+        "importance": importance,
+        "source": source,
+        "created_at": created_at,
+        "updated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    verb = "update" if existing else "create"
+    res = gitsvc.commit_file_to_branch(
+        root, branch, rel_path, render_document(meta, content),
+        f"{verb}: {title} [分支 {branch}]")
+    res.update({
+        "title": title, "rel_path": rel_path, "action": verb,
+        "current_branch": cur,
+        "note": (f"已提交到分支 {branch}，当前分支 {cur} 不受影响。"
+                 f"切到 {branch} 或把它合并过来之后，内容才会进入检索。"),
+    })
+    return res
 
 
 async def soft_delete_document(session: AsyncSession, user: User, doc: Document) -> Document:

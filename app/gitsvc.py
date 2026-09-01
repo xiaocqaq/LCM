@@ -1,6 +1,7 @@
 """git 版本化：每用户一个 repo（/var/lib/memorys/data/users/uN）。
 写入即提交（失败不阻断主流程），sync 负责推 GitHub 长期备份。
 """
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -235,6 +236,83 @@ def delete_branch(root: Path, name: str, force: bool = False) -> dict:
             out["hint"] = "该分支还有没合并的提交，删了内容就丢了。确认要丢就勾选「强制删除」。"
         return out
     return {"ok": True, "branch": name, "message": f"已删除分支 {name}"}
+
+
+def commit_file_to_branch(root: Path, branch: str, rel_path: str,
+                          content: str, message: str) -> dict:
+    """把一个文件直接提交到指定分支，**完全不碰工作区和当前分支**。
+
+    为什么不用 checkout：切过去写完再切回来要翻动两次工作区、重建两次索引，
+    中途任何一步失败都会把用户留在错误的分支上。用 plumbing 直接在对象库里
+    造 blob → tree → commit，工作区一动不动，当前分支也不变。
+
+    branch 不存在时从当前 HEAD 开一个。返回新 commit 的短 hash。
+    """
+    branch = _valid_branch(branch)
+    if not rel_path or rel_path.startswith("/") or ".." in rel_path:
+        raise ValueError("非法文件路径")
+
+    # 1) 内容写进对象库，拿到 blob hash
+    p = subprocess.run(["git", "-C", str(root), "hash-object", "-w", "--stdin"],
+                       input=content, capture_output=True, text=True, timeout=30)
+    if p.returncode != 0:
+        raise RuntimeError(f"hash-object 失败: {(p.stderr or '').strip()[:200]}")
+    blob = p.stdout.strip()
+
+    # 2) 用临时 index 拼出目标分支的新 tree（不能用默认 index，那是工作区的）
+    ref = f"refs/heads/{branch}"
+    parent = _git(root, "rev-parse", "--verify", "--quiet", ref, check=False)
+    created = not parent
+    if not parent:
+        # 分支不存在 → 以当前 HEAD 为基础开一个
+        parent = _git(root, "rev-parse", "--verify", "--quiet", "HEAD", check=False)
+
+    tmp_index = root / ".git" / f"index-mem-{blob[:8]}"
+    env = {"GIT_INDEX_FILE": str(tmp_index)}
+    try:
+        if parent:
+            _git_env(root, env, "read-tree", parent)
+        else:
+            _git_env(root, env, "read-tree", "--empty")
+        _git_env(root, env, "update-index", "--add", "--cacheinfo",
+                 f"100644,{blob},{rel_path}")
+        tree = _git_env(root, env, "write-tree")
+    finally:
+        tmp_index.unlink(missing_ok=True)
+
+    # 3) 造 commit 并把分支指针挪上去
+    args = ["commit-tree", tree, "-m", message]
+    if parent:
+        args += ["-p", parent]
+    commit = _git_env(root, {
+        "GIT_AUTHOR_NAME": settings.sync_identity_name,
+        "GIT_AUTHOR_EMAIL": settings.sync_identity_email,
+        "GIT_COMMITTER_NAME": settings.sync_identity_name,
+        "GIT_COMMITTER_EMAIL": settings.sync_identity_email,
+    }, *args)
+    _git(root, "update-ref", ref, commit)
+    return {"ok": True, "branch": branch, "commit": commit[:7],
+            "created_branch": created}
+
+
+def read_file_from_branch(root: Path, branch: str, rel_path: str) -> str | None:
+    """读取指定分支上某个文件的内容。不存在返回 None。"""
+    branch = _valid_branch(branch)
+    out = subprocess.run(
+        ["git", "-C", str(root), "show", f"refs/heads/{branch}:{rel_path}"],
+        capture_output=True, text=True, timeout=30)
+    return out.stdout if out.returncode == 0 else None
+
+
+def _git_env(repo: Path, env: dict, *args: str, timeout: int = 30) -> str:
+    """带额外环境变量跑 git（用于 GIT_INDEX_FILE / 作者身份）。"""
+    merged = dict(os.environ)
+    merged.update(env)
+    p = subprocess.run(["git", "-C", str(repo), *args], capture_output=True,
+                       text=True, timeout=timeout, env=merged)
+    if p.returncode != 0:
+        raise RuntimeError(f"git {args[0]} failed: {(p.stderr or '').strip()[:300]}")
+    return p.stdout.strip()
 
 
 def pull_from_github(root: Path, user_id: int) -> dict:

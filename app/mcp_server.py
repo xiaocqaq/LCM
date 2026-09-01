@@ -107,12 +107,16 @@ async def memory_write(
     library: str = "main",
     source: str = "agent",
     mode: str = "create",
+    branch: str = "",
 ) -> str:
     """写入一条记忆（md 格式落盘 + git 提交 + 建索引）。
 
     type: project_summary | decision | preference | howto | glossary | fact
     importance: 1-5，影响 memory_bootstrap 的优先级。
     mode: create（默认，撞同名标题会报冲突并给出已存在的 id）| upsert（同名则覆盖内容）。
+    branch: 留空写当前分支（默认）。指定别的分支名则只提交到该分支的 git 历史，
+        不落盘、不进检索索引，也不影响当前分支；分支不存在会自动创建。
+        适合"这条还不确定要不要留"的草稿，或整理性的批量改写。
     """
     user = _user()
     payload = {
@@ -120,6 +124,11 @@ async def memory_write(
         "tags": tags or [], "importance": importance, "library": library, "source": source,
     }
     async with SessionLocal() as s:
+        if branch:
+            try:
+                return _j(await service.write_to_branch(s, user, payload, branch))
+            except ValueError as e:
+                return _j({"ok": False, "error": str(e)})
         try:
             doc = await service.create_document(s, user, payload)
         except service.DuplicateError as e:

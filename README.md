@@ -217,6 +217,38 @@ UI 已经自动接上 reindex；走 REST 的话要自己补一次 `POST /api/v1/
 `/` 结尾、`.lock` 结尾）。这些值要拼进 git 命令，`--force` 之类的输入必须挡在门外。
 主分支和当前所在分支不允许删除。
 
+### 写记忆时直接选分支
+
+编辑页顶部有「保存到」下拉，可以把这一篇写到别的分支（下拉里还能现场新建）。
+REST 和 MCP 也支持：
+
+```bash
+# 新建并写到 draft 分支（分支不存在会自动创建）
+curl -X POST -H "X-Api-Key: $KEY" -H 'Content-Type: application/json' \
+  -d '{"title":"草稿","type":"fact","content":"..."}' \
+  "$BASE/api/v1/documents?branch=draft"
+
+# 已有文档"另存"到分支：原文档在当前分支保持不动
+curl -X PATCH -H "X-Api-Key: $KEY" -H 'Content-Type: application/json' \
+  -d '{"content":"改写版"}' "$BASE/api/v1/documents/123?branch=draft"
+```
+
+MCP：`memory_write(..., branch="draft")`。
+
+**写别的分支时不落盘、不进 DB，这是刻意的。**
+磁盘 md 和 PG 索引都是"当前分支"的平铺视图。如果写别的分支时也落盘，工作区就
+变成两个分支的混合体；如果也进 DB，检索会返回当前分支上根本不存在的文档。
+所以这条路径只往 git 对象库提交，等你切过去或合并过来，reindex 自然会收录。
+
+实现上**没有用 `checkout` 来回切**——那要翻动两次工作区、重建两次索引，
+中途任何一步失败都会把你留在错误的分支上。走的是 git plumbing：
+`hash-object` 造 blob → 临时 `GIT_INDEX_FILE` + `read-tree`/`update-index` 拼 tree
+→ `commit-tree` → `update-ref` 挪分支指针。工作区和当前分支全程一动不动
+（`git status --porcelain` 实测仍为空）。
+
+同一分支上重复写同路径会识别成 update 并保留原 `created_at`。
+目标分支写成当前分支会返回 400（那种情况直接正常保存即可）。
+
 ### GitHub 备份（可选，未启用）
 
 `.env` 里已配 `MEM_GITHUB_REMOTE=git@github.com:xiaocqaq/memorys-data.git`，但仓库还没建，所以推送会返回 `ok:false` 并提示。本机 SSH 免密已通（账号 `xiaocqaq`），去 GitHub 建一个同名私有空仓库就能用。
@@ -225,7 +257,7 @@ UI 已经自动接上 reindex；走 REST 的话要自己补一次 `POST /api/v1/
 
 ## 测试
 
-一键跑全部八套 + 服务状态 + 公网端点 + Hermes 侧闭环：
+一键跑全部九套 + 服务状态 + 公网端点 + Hermes 侧闭环：
 
 ```bash
 bash /opt/memorys/tests/acceptance.sh
@@ -243,6 +275,8 @@ cd /opt/memorys && export PYTHONPATH=/opt/memorys
 .venv/bin/python tests/public_mcp_test.py "$(cat /root/.memorys-hermes-key)"  # 公网 MCP 6 项
 .venv/bin/python tests/git_push_test.py         # GitHub 备份链路 13 项（本地 bare 仓库，不碰真远端）
 .venv/bin/python tests/branch_test.py           # 分支管理 23 项（建/切/合/删 + 非法输入）
+.venv/bin/python tests/branch_write_test.py     # 写入指定分支 25 项（隔离性 + 边界）
+bash tests/cleanup.sh                           # 测试跑完清残留（分支/文档/md/测试账号）
 
 # 把任意一套指向公网域名
 MEM_TEST_BASE=https://repo.xlingo.fun .venv/bin/python tests/e2e_test.py
@@ -296,3 +330,10 @@ DB 和磁盘要一起清。只清 DB 会留下孤儿 md，下次 `sync` 会被�
 17. **切分支/合并后一定要 reindex**。md 换了但 PG 索引没换，会搜到已经不在磁盘上的内容。
 18. 分支名会拼进 git 命令，必须白名单校验。`--force`、`a..b`、`x@{1}` 这类输入
     不挡住就会变成 git 的 flag 或保留语法。
+19. **往别的分支写文件不要用 `checkout` 来回切**。用 git plumbing
+    （`hash-object` → 临时 `GIT_INDEX_FILE` + `read-tree`/`update-index` → `commit-tree`
+    → `update-ref`），工作区零改动。`GIT_INDEX_FILE` 必须指向临时文件，
+    用默认 index 会把工作区的暂存状态搅乱。
+20. **UI 里"先写提示再刷新下拉"会白写**。`loadEditBranches()` 内部会调
+    `updateBranchHint()` 覆写 `#brhint`，所以要先 `await` 刷新、再写结果文案。
+    （踩过一次：保存成功但提示区是空的）

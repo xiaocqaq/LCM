@@ -144,8 +144,11 @@ code.key{background:#0d1320;border:1px solid var(--line);padding:3px 8px;border-
         <span style="flex:1"></span>
         <button id="ehist" class="ghost hidden" onclick="showHistory()">版本历史</button>
         <button id="edel" class="danger hidden" onclick="delDoc()">删除</button>
+        <span class="muted">保存到</span>
+        <select id="f-branch" style="width:auto;min-width:150px;max-width:260px"></select>
         <button class="primary" onclick="saveDoc()">保存</button>
       </div>
+      <div class="muted" id="brhint" style="margin:-4px 0 8px"></div>
       <div class="card col">
         <div class="kv"><label>标题</label><input id="f-title" placeholder="例：xspeak 项目架构总结"></div>
         <div class="kv"><label>类型</label>
@@ -466,6 +469,8 @@ function newDoc(){
   $('#hist').innerHTML='';
   ['title','project','tags','content'].forEach(k=>$('#f-'+k).value='');
   $('#f-library').value='main'; $('#f-importance').value=3; $('#f-type').value='fact';
+  $('#brhint').textContent='';
+  loadEditBranches();
 }
 async function openDoc(id){
   try{
@@ -477,6 +482,8 @@ async function openDoc(id){
     $('#f-title').value=d.title; $('#f-type').value=d.type; $('#f-library').value=d.library;
     $('#f-project').value=d.project||''; $('#f-tags').value=(d.tags||[]).join(', ');
     $('#f-importance').value=d.importance; $('#f-content').value=d.content||'';
+    $('#brhint').textContent='';
+    loadEditBranches();
   }catch(e){ toast(e.message,1); }
 }
 function formPayload(){
@@ -488,15 +495,60 @@ function formPayload(){
     source:'web:'+(S.user?S.user.username:'')
   };
 }
+/* 填充编辑页的「保存到」分支下拉。
+   默认选当前分支（等于原来的行为）；选别的分支时后端走 git plumbing 直接提交，
+   不动工作区也不进 DB —— 所以那种情况下本页的 S.doc 不会更新。 */
+async function loadEditBranches(){
+  const sel = $('#f-branch');
+  try{
+    const d = await api('/api/v1/branches');
+    S.branch = d.current;
+    const opts = d.branches.map(b=>
+      `<option value="${H(b.name)}"${b.current?' selected':''}>`
+      + `${H(b.name)}${b.current?'（当前）':''}</option>`).join('');
+    sel.innerHTML = opts + '<option value="__new__">+ 新建分支…</option>';
+    sel.value = d.current;
+    updateBranchHint();
+  }catch(e){
+    sel.innerHTML = '<option value="">（分支信息读取失败）</option>';
+  }
+}
+
+function updateBranchHint(){
+  const v = $('#f-branch').value;
+  const h = $('#brhint');
+  if(!v || v === S.branch){ h.textContent = ''; return; }
+  h.innerHTML = `保存到分支 <b>${H(v)}</b>：当前分支 ${H(S.branch)} 不受影响，`
+    + `内容也暂时不进检索 —— 切到该分支或把它合并过来之后才生效。`;
+}
+
+$('#f-branch').addEventListener('change', e=>{
+  if(e.target.value === '__new__'){
+    const name = (prompt('新分支名（字母数字和 . _ - /）：')||'').trim();
+    if(!name){ e.target.value = S.branch; updateBranchHint(); return; }
+    // 分支还不存在，后端 commit_file_to_branch 会自动从当前 HEAD 开
+    const o = document.createElement('option');
+    o.value = name; o.textContent = name + '（新建）';
+    e.target.insertBefore(o, e.target.lastElementChild);
+    e.target.value = name;
+  }
+  updateBranchHint();
+});
+
 async function saveDoc(){
   const p=formPayload();
   if(!p.title||!p.content){ toast('标题和正文都要填',1); return; }
+  const target = $('#f-branch').value;
+  const toOther = target && target !== '__new__' && target !== S.branch;
+  const qs = toOther ? ('?branch=' + encodeURIComponent(target)) : '';
   try{
     if(S.doc){
-      const d = await api('/api/v1/documents/'+S.doc.id,{method:'PATCH',body:JSON.stringify(p)});
+      const d = await api('/api/v1/documents/'+S.doc.id+qs,{method:'PATCH',body:JSON.stringify(p)});
+      if(toOther){ await branchSaveResult(d); return; }
       S.doc=d; toast('已保存 mem'+d.id);
     }else{
-      const d = await api('/api/v1/documents',{method:'POST',body:JSON.stringify(p)});
+      const d = await api('/api/v1/documents'+qs,{method:'POST',body:JSON.stringify(p)});
+      if(toOther){ await branchSaveResult(d); return; }
       S.doc=d; $('#etitle').textContent='mem'+d.id;
       $('#ehist').classList.remove('hidden'); $('#edel').classList.remove('hidden');
       toast('已创建 mem'+d.id);
@@ -506,6 +558,19 @@ async function saveDoc(){
     if(e.message.includes('已存在')) toast('已有同标题文档，改个标题或去列表里编辑那一篇',1);
     else toast(e.message,1);
   }
+}
+
+// 写到别的分支时后端返回的是 git 提交结果，不是文档对象
+async function branchSaveResult(d){
+  toast(`已${d.action==='update'?'更新':'写入'}分支 ${d.branch}（${d.commit}）`);
+  // 顺序要紧：loadEditBranches 内部会调 updateBranchHint 覆写 #brhint，
+  // 所以必须等它跑完再写结果，否则提示会被清空。
+  await loadEditBranches();
+  $('#f-branch').value = d.branch;
+  $('#brhint').innerHTML = `✅ 已写入 <code class="key">${H(d.rel_path)}</code>`
+    + ` → 分支 <b>${H(d.branch)}</b> commit <code class="key">${H(d.commit)}</code>`
+    + (d.created_branch?'（分支是新建的）':'')
+    + `<br>${H(d.note)}`;
 }
 async function delDoc(){
   if(!S.doc||!confirm('移到回收站？md 文件会进 .trash，git 留记录，可恢复。')) return;
