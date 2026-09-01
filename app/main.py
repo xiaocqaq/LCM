@@ -36,9 +36,24 @@ async def lifespan(app: FastAPI):
                 await conn.execute(text(stmt))
             except Exception:
                 pass
+        # hnsw 索引维度必须跟 settings.embed_dim 一致，且写死在索引定义里。
+        # 换模型换维度时旧索引会静默失效（表达式不匹配，PG 直接不用它，退化成全表扫描
+        # 且不报错），所以这里按维度命名索引，并把不同维度的旧索引删掉。
+        dim = settings.embed_dim
         try:
             await conn.execute(text("SELECT 1 FROM chunks LIMIT 1"))
-            await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_chunks_embedding ON chunks USING hnsw((embedding::vector(1536)) vector_cosine_ops)"))
+            rows = await conn.execute(text(
+                "SELECT indexname FROM pg_indexes "
+                "WHERE tablename='chunks' AND indexname LIKE 'idx_chunks_embedding%'"
+            ))
+            keep = f"idx_chunks_embedding_{dim}"
+            for (name,) in rows.fetchall():
+                if name != keep:
+                    await conn.execute(text(f'DROP INDEX IF EXISTS "{name}"'))
+            await conn.execute(text(
+                f"CREATE INDEX IF NOT EXISTS {keep} ON chunks "
+                f"USING hnsw((embedding::vector({dim})) vector_cosine_ops)"
+            ))
         except Exception:
             pass
     # MCP streamable HTTP 需要在应用生命周期内跑起 task group
@@ -260,15 +275,30 @@ async def search(q: str = "", limit: int = 10, mode: str = "hybrid", library: st
         # 直接返回 200 空结果会掩盖"参数名拼错"这类调用错误（比如误传 query= 而非 q=），
         # 调用方看到的是"库里没有"，实际是请求本身没带上查询词。
         raise HTTPException(400, detail="缺少查询词：请用 ?q=... 传检索内容")
-    results = None
-    if mode in ("hybrid", "semantic"):
-        results = await service.semantic_search(session, ctx.user, q, limit)
-    if not results:
-        results = await service.search_chunks(session, ctx.user, q, limit, library, project)
-        mode_used = "keyword"
-    else:
-        mode_used = "semantic"
-    return {"results": results, "mode": mode_used, "query": q}
+    # mode=hybrid（默认）走 search_chunks 的三路 RRF 融合。
+    #
+    # 这里曾经有个严重 bug：hybrid 时先单独调 semantic_search 并直接返回它的原始结果，
+    # 只在它为空时才 fallback 到 search_chunks。后果是一旦配上 embedding，
+    # 排序就完全由裸余弦相似度决定 —— 绕过了 RRF 融合、长度归一化、importance 加权
+    # 和 PER_DOC_CAP，而且 library/project 过滤参数根本没传下去（过滤被静默绕过）。
+    # 实测表现：长文相似度 0.671 > 对题短文 0.625，长文排第一，
+    # 长度归一化的所有工作全部失效。
+    # 那段代码是接三路融合之前的遗留，现已删除。
+    if mode == "semantic":
+        # 只有显式要求纯语义时才裸用向量路，用于调试对比
+        results = await service.semantic_search(
+            session, ctx.user, q, limit, library=library, project=project)
+        if results is None:
+            raise HTTPException(
+                503, detail="向量检索不可用（未配置 embedding 或上游超时），可改用 mode=keyword")
+        return {"results": results, "mode": "semantic", "query": q}
+    if mode == "keyword":
+        # 显式跳过向量路，用于对比测量向量带来的增益
+        results = await service.search_chunks(
+            session, ctx.user, q, limit, library, project, use_vector=False)
+        return {"results": results, "mode": "keyword", "query": q}
+    results = await service.search_chunks(session, ctx.user, q, limit, library, project)
+    return {"results": results, "mode": "hybrid", "query": q}
 
 
 # ---------- bootstrap ----------

@@ -1,4 +1,5 @@
 """核心业务：文档 CRUD（md 为准、DB 索引）、检索（关键词+trgm+RRF 混合）、bootstrap。"""
+import asyncio
 import re
 import uuid
 from datetime import datetime, timezone
@@ -20,7 +21,7 @@ from .mdstore import (
     user_root,
 )
 from .models import Chunk, Document, User
-from .search import embed_texts, expand_tokens, to_tsquery
+from .search import embed_query, embed_texts, expand_tokens, to_tsquery
 
 
 def _now():
@@ -325,6 +326,13 @@ async def _reindex_document(session: AsyncSession, doc: Document, do_embed: bool
     embeds = None
     if do_embed:
         embeds = await embed_texts([f"{doc.title}\n{p['heading']}\n{p['content']}" for p in pieces])
+        # embed_texts 允许部分成功（上游随机超时），失败位是 None。
+        # 维度不符的单独剔掉而不是整批丢：hnsw 索引建在固定维度上，
+        # 混入别的维度写入会被 pgvector 拒，但没理由因为一条坏的放弃其余好的。
+        if embeds:
+            embeds = [v if (v and len(v) == settings.embed_dim) else None for v in embeds]
+            if not any(embeds):
+                embeds = None
     for seq, p in enumerate(pieces):
         lex = _tsvector_literal(f"{doc.title} {doc.project} {' '.join(doc.tags or [])} {p['heading']} {p['content']}")
         ch = Chunk(document_id=doc.id, seq=seq, heading=p["heading"], content=p["content"])
@@ -334,15 +342,17 @@ async def _reindex_document(session: AsyncSession, doc: Document, do_embed: bool
             text("UPDATE chunks SET tsv = to_tsvector('simple', :lex) WHERE id = :id"),
             {"lex": lex, "id": ch.id},
         )
-        if embeds:
-            vec = embeds[seq]
+        vec = embeds[seq] if embeds else None
+        if vec:
             await session.execute(
-                text("UPDATE chunks SET embedding = CAST(:vec AS vector) WHERE id = :id"),
+                text(f"UPDATE chunks SET embedding = CAST(:vec AS vector({settings.embed_dim})) WHERE id = :id"),
                 {"vec": "[" + ",".join(f"{x:.6f}" for x in vec) + "]", "id": ch.id},
             )
 
 
-async def search_chunks(session: AsyncSession, user: User, q: str, limit: int = 10, library: str | None = None, project: str | None = None) -> list[dict]:
+async def search_chunks(session: AsyncSession, user: User, q: str, limit: int = 10,
+                        library: str | None = None, project: str | None = None,
+                        use_vector: bool = True) -> list[dict]:
     """关键词检索（tsvector OR + ts_rank）+ trgm 相似度兜底，RRF 融合。"""
     tsq = to_tsquery(q)
     kw_rows: list[tuple] = []
@@ -372,14 +382,59 @@ async def search_chunks(session: AsyncSession, user: User, q: str, limit: int = 
     )
     trgm_rows = (await session.execute(trgm_sql, {"q": q[:2000]})).all()
 
-    # RRF 融合
+    # 第三路：向量语义检索。没配 embedding 或上游挂了就返回 None，自动降级为两路。
+    # 放在这里而不是并发跑：三路里只有这一路有网络往返（实测 280-800ms），
+    # 而前两路是本地 PG 查询（个位数毫秒），并发省不下什么，反而让失败处理变复杂。
+    vec_rows: list[tuple] = []
+    # 预算保护放在这一层而不是只靠 embed_query 内部：向量路是整条检索里唯一
+    # 会碰网络的部分，超时保护必须是结构性的 —— 换 embedding 实现、
+    # 或者哪天有人在 semantic_search 里加了别的远程调用，这里依然兜得住。
+    sem = None
+    if use_vector:
+        try:
+            sem = await asyncio.wait_for(
+                semantic_search(session, user, q, limit=limit * 3,
+                                library=library, project=project),
+                timeout=settings.embed_query_timeout + 1.0,
+            )
+        except (TimeoutError, asyncio.TimeoutError):
+            sem = None
+        except Exception:
+            sem = None
+    if sem:
+        # semantic_search 返回的是已组装的 dict，这里只取排序用的 id/doc_id。
+        #
+        # 每篇文档在向量路里最多留 VEC_PER_DOC 个 chunk。这一条不是优化而是必须：
+        # 长文档 chunk 多，就有更多机会挤进向量 top-N，每个 chunk 都独立贡献一份
+        # RRF 分数，于是长文靠"票多"重新拿回了长度归一化刚刚抵掉的优势。
+        # 实测没有这个约束时，28 chunk 的长文会把对题短文压到第二。
+        # 关键词/trgm 两路不需要这条，它们在 SQL 里就按 ts_rank 排过序，
+        # 长文的多个 chunk 不会全挤在前面。
+        VEC_PER_DOC = 2
+        seen_doc: dict[int, int] = {}
+        for s in sem:
+            did = s["document_id"]
+            if seen_doc.get(did, 0) >= VEC_PER_DOC:
+                continue
+            seen_doc[did] = seen_doc.get(did, 0) + 1
+            vec_rows.append((s["chunk_id"], did))
+
+    # RRF 融合。三路等权 —— 关键词精确但对同义改写无能，trgm 抗错字但会被长文噪声带偏，
+    # 向量懂语义但对专有名词/路径/端口这类字面量不敏感。谁都不该压倒另外两个。
     rrf: dict[int, dict] = {}
     doc_ids = set()
-    for rows in (kw_rows, trgm_rows):
+    by_id = {r[0]: r for r in kw_rows + trgm_rows}
+    for rows in (kw_rows, trgm_rows, vec_rows):
         for rank, r in enumerate(rows):
-            e = rrf.setdefault(r[0], {"row": r, "score": 0.0})
+            cid = r[0]
+            # 向量路可能召回前两路没见过的 chunk，此时 row 只有 (id, doc_id)，
+            # 缺 heading/content 等字段，需要从 sem 结果里补齐
+            if cid not in by_id and sem:
+                s = next(x for x in sem if x["chunk_id"] == cid)
+                by_id[cid] = (cid, s["document_id"], s["seq"], s["heading"], s["content"], 0.0)
+            e = rrf.setdefault(cid, {"row": by_id[cid], "score": 0.0})
             e["score"] += 1.0 / (60 + rank + 1)
-            doc_ids.add(r[1])
+            doc_ids.add(by_id[cid][1])
 
     # ---- 长度归一化 + importance 加权 ----
     # 为什么需要：RRF 只看排名，不看文档体量。实测 17 个查询，一篇 15303 字符的长文
@@ -441,26 +496,48 @@ async def search_chunks(session: AsyncSession, user: User, q: str, limit: int = 
     return out
 
 
-async def semantic_search(session: AsyncSession, user: User, q: str, limit: int = 10) -> list[dict] | None:
-    """embedding 向量检索（配置了才可用）。返回 None 表示不可用。"""
+async def semantic_search(session: AsyncSession, user: User, q: str, limit: int = 10,
+                          library: str | None = None, project: str | None = None) -> list[dict] | None:
+    """embedding 向量检索（配置了才可用）。返回 None 表示不可用。
+
+    library/project 过滤必须和 search_chunks 保持一致 —— 否则融合进 RRF 后
+    向量路会把用户明确过滤掉的文档带回结果里。
+    """
     from .search import EMBED_AVAILABLE
     if not EMBED_AVAILABLE:
         return None
-    qvec = await embed_texts([q])
-    if not qvec:
+    # 走 embed_query 而不是 embed_texts：检索有硬性时间预算，
+    # 上游抖动时直接降级成两路关键词，不能让用户等重试
+    qv = await embed_query(q)
+    if not qv:
         return None
-    vec_str = "[" + ",".join(f"{x:.6f}" for x in qvec[0]) + "]"
+    vec_str = "[" + ",".join(f"{x:.6f}" for x in qv) + "]"
+    dim = settings.embed_dim
+    # 距离表达式必须逐字匹配 hnsw 索引的定义 `(embedding::vector(<dim>))`，
+    # 否则 PG 认不出可用索引，静默退化成全表扫描 + 逐行算距离（不报错，只是慢）。
+    # embedding IS NULL 的 chunk 必须排掉：向量列是可空的（上游挂了就不写），
+    # NULL 参与排序会挤占 LIMIT 名额。
+    params: dict = {"vec": vec_str, "uid": user.id, "lim": limit}
+    extra = ""
+    # 用 CAST(:x AS text) 而不是裸 :x —— asyncpg 对无类型参数推不出类型会报
+    # AmbiguousParameterError（README 坑 1、2）
+    if library:
+        extra += " AND d.library = CAST(:lib AS text)"
+        params["lib"] = library
+    if project:
+        extra += " AND d.project = CAST(:proj AS text)"
+        params["proj"] = project
     sql = text(
-        """
+        f"""
         SELECT c.id, c.document_id, c.seq, c.heading, c.content,
-               1 - (c.embedding <=> CAST(:vec AS vector)) AS score
+               1 - (c.embedding::vector({dim}) <=> CAST(:vec AS vector({dim}))) AS score
         FROM chunks c JOIN documents d ON d.id = c.document_id
-        WHERE d.user_id = :uid AND d.deleted_at IS NULL
-        ORDER BY c.embedding <=> CAST(:vec AS vector)
+        WHERE d.user_id = :uid AND d.deleted_at IS NULL AND c.embedding IS NOT NULL{extra}
+        ORDER BY c.embedding::vector({dim}) <=> CAST(:vec AS vector({dim}))
         LIMIT :lim
         """
     )
-    rows = (await session.execute(sql, {"vec": vec_str, "uid": user.id, "lim": limit})).all()
+    rows = (await session.execute(sql, params)).all()
     doc_ids = {r[1] for r in rows}
     docs = {d.id: d for d in (await session.execute(select(Document).where(Document.id.in_(list(doc_ids))))).scalars()}
     out = []

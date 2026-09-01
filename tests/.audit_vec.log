@@ -1,0 +1,42 @@
+
+=== A 类 概念词→具体形态：命中 5/5，排第一 4/5 ===
+  ✅ 记忆文件存在哪个目录 rank=1
+       返回 5 条 → ['memorys 上线记录', 'Hermes Agent Bridge IPC socket 被清理后的恢复与预防', 'frcws-service：cmos_base_account_detail 大数据查询优化上下文']
+  ✅ 服务监听哪个端口 rank=1
+       返回 5 条 → ['memorys 上线记录', 'Hermes Agent Bridge IPC socket 被清理后的恢复与预防', 'hs.xlingo.fun 自定义前端发布流程与当前生产状态（v0.7.15）']
+  ✅ 怎么鉴权 rank=2
+       返回 5 条 → ['frcws-service：cmos_base_account_detail 大数据查询优化上下文', 'memorys 上线记录']
+  ✅ xspeak 部署在哪 rank=1
+       返回 5 条 → ['xspeak 项目架构', 'memorys 上线记录']
+  ✅ 前端发布流程 rank=1
+       返回 5 条 → ['hs.xlingo.fun 自定义前端发布流程与当前生产状态（v0.7.15）']
+
+=== B 类 同义改写：命中 9/10，排第一 9/10 ===
+  ✅ 语音合成用哪家 rank=1
+       返回 5 条 → ['TTS 选型决策', 'memorys 上线记录', 'xspeak 项目架构']
+  ✅ 朗读功能选型 rank=1
+       返回 5 条 → ['TTS 选型决策', '引导时机：要在用户开口前', 'frcws-service：cmos_base_account_detail 大数据查询优化上下文']
+  ✅ 提示应该什么时候给用户看 rank=1
+       返回 5 条 → ['引导时机：要在用户开口前', 'memorys 上线记录', '陷阱：前端调 requireSuperAdmin 端点会触发全局 403 弹窗风暴']
+  ✅ 套接字文件丢了怎么办 rank=1
+       返回 5 条 → ['Hermes Agent Bridge IPC socket 被清理后的恢复与预防', 'TTS 选型决策']
+  ✅ 管理员接口报权限错误 rank=1
+       返回 5 条 → ['陷阱：前端调 requireSuperAdmin 端点会触发全局 403 弹窗风暴', 'Hermes Agent Bridge IPC socket 被清理后的恢复与预防', 'frcws-service：cmos_base_account_detail 大数据查询优化上下文']
+  ✅ 查询太慢怎么优化 rank=1
+       返回 5 条 → ['frcws-service：cmos_base_account_detail 大数据查询优化上下文']
+  ✅ 换行符问题 rank=1
+       返回 5 条 → ['Windows 本地开发：行尾、jsdom realm 与测试构建命令', 'hs.xlingo.fun 自定义前端发布流程与当前生产状态（v0.7.15）', 'memorys 上线记录']
+  ❌ 怎么把改动同步到线上
+       返回 5 条 → ['del_ad 分支定制清单与合上游后的固定动作', 'xspeak 项目架构', 'TTS 选型决策']
+  ✅ 大表统计耗时 rank=1
+       返回 5 条 → ['frcws-service：cmos_base_account_detail 大数据查询优化上下文', 'TTS 选型决策']
+  ✅ 弹窗一直冒出来 rank=1
+       返回 5 条 → ['陷阱：前端调 requireSuperAdmin 端点会触发全局 403 弹窗风暴', 'Hermes Agent Bridge IPC socket 被清理后的恢复与预防']
+
+=== C 类 跨篇/推理（无固定答案，看返回内容是否相关）===
+  — 这个项目有哪些坑
+       返回 5 条 → ['xspeak 项目架构', 'TTS 选型决策', '陷阱：前端调 requireSuperAdmin 端点会触发全局 403 弹窗风暴']
+  — 我做过哪些技术选型
+       返回 5 条 → ['TTS 选型决策', 'memorys 上线记录', 'frcws-service：cmos_base_account_detail 大数据查询优化上下文']
+
+总计（有明确答案的 15 条）：命中 14，miss 1，命中率 93%

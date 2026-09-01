@@ -17,7 +17,19 @@ class Settings(BaseSettings):
     embed_api_base: str = ""
     embed_api_key: str = ""
     embed_model: str = "text-embedding-3-small"
+    # 向量维度。必须和上游实际返回的一致 —— hnsw 索引建在固定维度上，
+    # 写入维度不符会被 pgvector 直接拒。改这个值必须重建索引 + 全量 reindex。
+    # 实测：阿里云百炼 qwen3.7-text-embedding-flash 返回 1024（给 1536 会被忽略）。
     embed_dim: int = 1536
+    # 批量上限。阿里云百炼是 25，超一条整批 400。
+    embed_batch_size: int = 25
+    # 写入侧超时：reindex 是后台批处理，慢一点没关系，值得等重试。
+    embed_timeout: float = 30.0
+    # 查询侧总预算：检索是交互路径。上游实测会随机 ReadTimeout，
+    # 不能让一次抖动把搜索卡住 —— 超了就直接降级成两路关键词检索，
+    # 用户拿到的结果略差，但立刻有结果。
+    embed_query_timeout: float = 4.0
+    embed_max_chars: int = 2500
     app_host: str = "127.0.0.1"
     app_port: int = 8649
     # 反代挂载前缀。nginx 把 /mem/ strip 掉后转发到本服务，本服务自身路由不含前缀，

@@ -1,0 +1,17 @@
+EMBED_AVAILABLE=True  model=qwen3.7-text-embedding-flash  dim=1024
+共 10 篇文档
+
+   1/10 ✅ 3/3 chunk    1.1s  memorys 上线记录
+   2/10 ✅ 3/3 chunk    0.3s  xspeak 项目架构
+   3/10 ✅ 3/3 chunk    0.3s  TTS 选型决策
+   4/10 ✅ 1/1 chunk    0.3s  引导时机：要在用户开口前
+   5/10 ❌ 无向量 0/28 chunk    5.9s  frcws-service：cmos_base_account_detail
+   6/10 ✅ 7/7 chunk    0.5s  Hermes Agent Bridge IPC socket 被清理后的恢复
+   7/10 ✅ 5/5 chunk    0.5s  hs.xlingo.fun 自定义前端发布流程与当前生产状态（v0.7.15
+   8/10 ❌ 无向量 0/5 chunk  184.9s  陷阱：前端调 requireSuperAdmin 端点会触发全局 403 弹
+   9/10 ✅ 6/6 chunk    0.4s  Windows 本地开发：行尾、jsdom realm 与测试构建命令
+  10/10 ❌ 无向量 0/4 chunk  184.9s  del_ad 分支定制清单与合上游后的固定动作
+
+总计 255 chunk，28 个有向量，耗时 379.0s
+⚠️ 227 个 chunk 没有向量（上游失败会整批降级，检索仍可用）
+EXIT=0

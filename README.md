@@ -299,7 +299,7 @@ ls /tmp/vfy/main/ && head -8 /tmp/vfy/main/*.md
 
 ## 测试
 
-一键跑全部十一套 + 服务状态 + 公网端点 + Hermes 侧闭环：
+一键跑全部十二套 + 服务状态 + 公网端点 + Hermes 侧闭环：
 
 ```bash
 bash /opt/memorys/tests/acceptance.sh
@@ -320,6 +320,9 @@ cd /opt/memorys && export PYTHONPATH=/opt/memorys
 .venv/bin/python tests/branch_write_test.py     # 写入指定分支 25 项（隔离性 + 边界）
 .venv/bin/python tests/bootstrap_budget_test.py # bootstrap token 预算 22 项
 .venv/bin/python tests/rank_test.py             # 排序质量 6 项（长度归一化+importance）
+.venv/bin/python tests/vec_search_test.py       # 向量检索契约 13 项（降级/预算/过滤/维度）
+.venv/bin/python tests/ab_vector.py            # 两路 vs 三路 A/B 对比（非断言）
+.venv/bin/python tests/probe_dashscope.py      # embedding 上游能力探测
 .venv/bin/python tests/recall_audit.py          # 召回质量基线（非断言，看命中率）
 bash tests/cleanup.sh                           # 测试跑完清残留（分支/文档/md/测试账号）
 
@@ -405,6 +408,32 @@ DB 和磁盘要一起清。只清 DB 会留下孤儿 md，下次 `sync` 会被�
 26. 对比度要算不要看。写脚本取 `computedStyle` 算 WCAG 比值（方法见「UI 主题」节），
     目测会系统性高估细描边和小字号元素 —— 放大截图看更会。
 27. 主题初始化脚本必须放 `<head>`，放 `body` 会先渲染一帧默认主题再跳变。
+28. **配上 embedding 会让排序逻辑被整体绕过**（真出过的严重 bug）。
+    `/api/v1/search` 和 MCP `memory_search` 原来都是"先裸调 `semantic_search`，
+    为空才 fallback 到 `search_chunks`"。没配 embedding 时 `semantic_search`
+    返回 None，永远走 fallback，看不出问题；一配上就变成纯余弦排序，
+    绕过 RRF 融合、长度归一化、importance 加权、`PER_DOC_CAP`，
+    而且 `library`/`project` 过滤参数根本没往下传。
+    **教训**：融合入口只能有一个，别在调用侧留"快捷路径"。
+29. **hnsw 索引维度写死在表达式里，换维度不报错而是静默失效**。
+    索引建在 `(embedding::vector(1536))` 上，换 1024 维模型后 PG 认不出
+    这个索引可用，悄悄退化成全表扫描。按维度命名索引
+    （`idx_chunks_embedding_<dim>`），启动时删掉维度不符的旧索引。
+    查询侧的距离表达式必须和索引定义**逐字一致**。
+30. **向量路必须单独限每篇文档的 chunk 数**（`VEC_PER_DOC=2`）。
+    长文档 chunk 多 → 更多机会挤进向量 top-N → 每个 chunk 独立贡献 RRF 分数
+    → 长文靠"票多"重新拿回长度归一化刚抵掉的优势。
+    关键词两路不需要这条，它们在 SQL 里已按 `ts_rank` 排过序。
+31. **反向测试用例不能断言"零结果"**。向量检索的最近邻永远有 N 条，
+    没有"完全不匹配"这个概念，「孜然羊肉」也会返回技术文档。
+    判据改成分数分布：无关查询 top1 要低于正向 top1 的最低分。
+32. **写入侧和查询侧的超时预算必须分开**。reindex 是后台批处理，等重试是对的；
+    检索是交互路径，宁可降级也不能卡住。拆成 `embed_texts` / `embed_query`，
+    且预算保护要放在 `search_chunks` 层用 `asyncio.wait_for` 兜住，
+    不能只靠 `embed_query` 内部 —— 换实现时才不会漏。
+33. **孤儿 chunk 会让向量覆盖率统计失真**。软删除文档的 chunk 不会被检索到，
+    但会计入 `count(*)`，看起来像"一堆 chunk 没有向量"。
+    reindex 时先 `DELETE FROM chunks USING documents WHERE deleted_at IS NOT NULL`。
 
 ---
 
@@ -475,3 +504,83 @@ const ratio=(a,b)=>{const l1=L(a),l2=L(b);
 | 日期/计数 | 5.39:1 | 5.49:1 | 4.5 |
 | 实星 | 4.09:1 | 7.72:1 | 3 |
 | 空星 | 3.30:1 | 3.45:1 | 3 |
+
+---
+
+## 向量检索（已启用）
+
+上游是阿里云百炼 `qwen3.7-text-embedding-flash`，走官方 OpenAI 兼容端点直连。
+
+**为什么不经 octopus 网关**：octopus 只注册了 `/chat/completions`、`/responses`、
+`/messages` 三条转发路由，没有 `/embeddings`，请求路径不存在，Go router 直接
+返回 `404 page not found`。在管理后台加模型只是进了模型列表，不会凭空长出路由。
+底层 `axonhub/llm` 库其实支持 embedding（二进制里有 openai/gemini/doubao 的
+transformEmbedding 符号），但要改 Go 源码重新编译，不值得为这个碰网关。
+
+### 实测参数
+
+| 项 | 实测值 | 影响 |
+|---|---|---|
+| 维度 | **1024** | 给 `dimensions=1536` 会被静默忽略；768 支持 |
+| 批量上限 | **25** | 26 条整批 400 |
+| 归一化 | 是（L2=0.9998） | 可以用 cosine |
+| 确定性 | 0.99868（不完全一致） | 缓存会漂移，别做长期向量缓存 |
+| 延迟 | 单条 ~250ms，25 条 ~570ms | 检索侧要设预算 |
+| 中文可分性 | 正向最低 0.295 / 无关最高 0.245 | 间隔仅 +0.050 → **不设绝对阈值**，只靠 RRF 排名 |
+
+### A/B 增益（`tests/ab_vector.py`，15 个查询）
+
+|  | 两路（关键词+trgm） | 三路（+向量） |
+|---|---|---|
+| top5 命中率 | 80% | **100%** |
+| top1 命中率 | 73% | 73% |
+
+向量救回的 3 条都是纯概念提问：「数据存在哪里」「怎么换语音合成服务」
+「语音朗读用哪个服务」—— 提问用的词正文里一个都没有，索引侧同义扩展再怎么加
+也够不着。top1 持平说明向量补的是**召回**不是排序，跟长度归一化各管一段。
+
+### 配置
+
+```bash
+MEM_EMBED_API_BASE=https://dashscope.aliyuncs.com/compatible-mode/v1
+MEM_EMBED_API_KEY=sk-...
+MEM_EMBED_MODEL=qwen3.7-text-embedding-flash
+MEM_EMBED_DIM=1024          # 必须和上游实际返回一致，改了要重启重建索引
+MEM_EMBED_BATCH_SIZE=25
+MEM_EMBED_TIMEOUT=30        # 写入侧：reindex 可以慢，值得等重试
+MEM_EMBED_QUERY_TIMEOUT=4   # 查询侧：交互路径，超了直接降级
+```
+
+改完必须全量重建向量：
+
+```bash
+PYTHONPATH=/opt/memorys .venv/bin/python tests/reindex_vec.py
+```
+
+### 三级降级（上游会随机超时）
+
+实测这个上游会**随机** ReadTimeout：同一条 chunk 单独重发也可能超时，
+而更长的下一条却 250ms 正常返回。跟内容、长度、批量都无关。
+
+所以 `embed_texts` 是三级降级：整批重试 → 拆单条逐个要 → 单条也失败才认输。
+一批 25 条里通常只有 1-2 条踩雷，拆开能捞回其余 23 条。
+实测：28 chunk 的长文从 0/28 变成 25/28，全库 60/65 = 92.3%。
+
+缺向量的 chunk 不影响可用性 —— 它们走关键词两路，有向量的走三路。
+
+### mode 参数
+
+| mode | 行为 | 用途 |
+|---|---|---|
+| `hybrid`（默认） | 三路 RRF 融合 | 正常检索 |
+| `keyword` | 显式跳过向量路 | A/B 测量向量增益 |
+| `semantic` | 只用向量，裸相似度排序 | 调试对比，**不要给用户用** |
+
+`semantic` 绕过了长度归一化和 importance 加权，排序质量比 hybrid 差，
+留着只为了能单独看向量路的行为。
+
+### 什么时候该重新评估
+
+- 命中率跌破 80%（现在 100%）
+- 文档过 500 篇后延迟明显（现在 60 行数据 PG 还在走 Seq Scan，索引都用不上）
+- 上游超时率超过 20%（现在约 8%）

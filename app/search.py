@@ -136,24 +136,115 @@ def expand_tokens(text: str, limit: int = 220) -> list[str]:
 EMBED_AVAILABLE = bool(settings.embed_api_base and settings.embed_api_key)
 
 
-async def embed_texts(texts: list[str]) -> list[list[float]] | None:
-    """OpenAI 兼容 /embeddings。未配置或失败返回 None（检索自动降级为纯关键词）。"""
+async def embed_query(text_: str) -> list[float] | None:
+    """给检索用的单条嵌入，有硬性时间预算。
+
+    和 embed_texts 分开是因为两者对"慢"的容忍度完全不同：
+    reindex 是后台批处理，等重试是对的；检索是交互路径，宁可降级也不能卡住。
+    """
+    import asyncio
+
+    if not EMBED_AVAILABLE:
+        return None
+    try:
+        vecs = await asyncio.wait_for(
+            embed_texts([text_], timeout=settings.embed_query_timeout, retries=0),
+            timeout=settings.embed_query_timeout + 0.5,
+        )
+    except (TimeoutError, asyncio.TimeoutError):
+        return None
+    except Exception:
+        return None
+    if not vecs or not vecs[0]:
+        return None
+    return vecs[0]
+
+
+async def embed_texts(texts: list[str], timeout: float | None = None,
+                      retries: int = 1) -> list[list[float]] | None:
+    """OpenAI 兼容 /embeddings。未配置或失败返回 None（检索自动降级为纯关键词）。
+
+    分批提交：上游有批量上限（阿里云百炼 25，超一条整批 400），
+    一次 reindex 的 chunk 数远超这个值。
+
+    重试策略是实测逼出来的：阿里云会**随机** ReadTimeout，跟内容、长度、批量都无关
+    （同一条 chunk 单独重发也可能超时，而更长的下一条却正常）。所以：
+      1. 整批失败先原样重试
+      2. 仍失败就拆成单条逐个要 —— 一批 25 条里通常只有 1-2 条踩雷，
+         拆开后其余 23 条能正常拿到，比整批放弃划算得多
+      3. 单条也失败才认输
+
+    返回 None 表示"这批一个都没成"，调用方降级为纯关键词。
+    部分成功用 None 占位而不是丢弃，让调用方知道哪几条缺向量。
+    """
     if not EMBED_AVAILABLE or not texts:
         return None
+    import asyncio
+
     import httpx
 
     base = settings.embed_api_base.rstrip("/")
     if not base.endswith("/embeddings"):
         base += "/embeddings"
-    try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.post(
-                base,
-                headers={"Authorization": f"Bearer {settings.embed_api_key}"},
-                json={"model": settings.embed_model, "input": [t[:3000] for t in texts]},
-            )
-            resp.raise_for_status()
-            data = resp.json()["data"]
-            return [d["embedding"] for d in data]
-    except Exception:
+    bs = max(1, settings.embed_batch_size)
+    payload_extra: dict = {}
+    if settings.embed_dim:
+        # 支持 Matryoshka 截断的模型（text-embedding-v3/v4、qwen3.x）认这个参数；
+        # 不支持的会忽略，所以不能靠它保证维度，仍要在写入侧校验
+        payload_extra["dimensions"] = settings.embed_dim
+
+    async def _post(client, batch: list[str]) -> list[list[float]]:
+        resp = await client.post(
+            base,
+            headers={"Authorization": f"Bearer {settings.embed_api_key}"},
+            json={
+                "model": settings.embed_model,
+                "input": batch,
+                "encoding_format": "float",
+                **payload_extra,
+            },
+        )
+        resp.raise_for_status()
+        rows = resp.json()["data"]
+        # 上游不保证顺序，按 index 归位
+        rows.sort(key=lambda d: d.get("index", 0))
+        vecs = [d["embedding"] for d in rows]
+        if len(vecs) != len(batch):
+            raise ValueError(f"上游返回 {len(vecs)} 条，期望 {len(batch)}")
+        return vecs
+
+    out: list[list[float] | None] = []
+    async with httpx.AsyncClient(timeout=timeout or settings.embed_timeout) as client:
+        for i in range(0, len(texts), bs):
+            batch = [t[: settings.embed_max_chars] for t in texts[i : i + bs]]
+            got: list[list[float]] | None = None
+            for attempt in range(retries + 1):
+                try:
+                    got = await _post(client, batch)
+                    break
+                except Exception:
+                    if attempt < retries:
+                        await asyncio.sleep(1.5)
+            if got is not None:
+                out.extend(got)
+                continue
+            if retries == 0 or len(batch) == 1:
+                # 查询路径（retries=0）不做逐条降级：只有一条，拆也没意义，
+                # 且再等一轮就超出交互预算了
+                out.extend([None] * len(batch))
+                continue
+            # 整批重试仍失败 → 拆单条捞回大部分（一批里通常只有 1-2 条踩雷）
+            for t in batch:
+                one: list[float] | None = None
+                for attempt in range(2):
+                    try:
+                        one = (await _post(client, [t]))[0]
+                        break
+                    except Exception:
+                        if attempt == 0:
+                            await asyncio.sleep(1.0)
+                out.append(one)
+
+    if not any(v is not None for v in out):
         return None
+    return out  # type: ignore[return-value]

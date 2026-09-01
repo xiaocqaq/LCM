@@ -61,11 +61,13 @@ async def memory_search(query: str, limit: int = 8, library: str = "", project: 
     """
     user = _user()
     async with SessionLocal() as s:
-        hits = await service.semantic_search(s, user, query, limit)
-        mode = "semantic"
-        if not hits:
-            hits = await service.search_chunks(s, user, query, limit, library or None, project or None)
-            mode = "keyword"
+        # 走 search_chunks 的三路 RRF 融合。
+        # 这里原来和 REST 端点犯了同一个错：先裸调 semantic_search 并直接用它的结果，
+        # 只在为空时才 fallback。那样排序完全由余弦相似度决定，绕过长度归一化、
+        # importance 加权和 PER_DOC_CAP，而且 library/project 过滤根本没传进去。
+        hits = await service.search_chunks(
+            s, user, query, limit, library or None, project or None)
+        mode = "hybrid"
     if not hits:
         return _j({"ok": True, "mode": mode, "count": 0, "results": [],
                    "message": f"没有命中「{query}」。可以先用 memory_list_docs 看看库里有什么。"})
