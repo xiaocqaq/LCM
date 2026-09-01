@@ -99,6 +99,7 @@ code.key{background:#0d1320;border:1px solid var(--line);padding:3px 8px;border-
     <div class="navitem" data-v="trash" onclick="nav('trash')">🗑 回收站</div>
     <div class="navitem" data-v="keys" onclick="nav('keys')">🔑 API Key</div>
     <div class="navitem" data-v="sync" onclick="nav('sync')">☁️ 同步 / GitHub</div>
+    <div class="navitem" data-v="branch" onclick="nav('branch')">🌿 分支</div>
     <div class="sec">接入</div>
     <div class="navitem" data-v="mcp" onclick="nav('mcp')">🔌 MCP 配置</div>
     <div class="sec">库</div>
@@ -217,14 +218,75 @@ code.key{background:#0d1320;border:1px solid var(--line);padding:3px 8px;border-
       <pre class="out" id="syncout"></pre>
     </section>
 
+    <!-- 分支 -->
+    <section id="v-branch" class="hidden">
+      <div class="card col">
+        <h3>当前分支</h3>
+        <div class="row" style="align-items:center">
+          <code class="key" id="curbranch" style="font-size:15px">…</code>
+          <span class="muted" id="dirtyflag"></span>
+        </div>
+        <div class="muted">
+          想大改记忆又怕搞乱主线，就开个分支改，满意了再合回来，不想要就删掉。
+          切换和合并<b>会改变磁盘上的 md 文件</b>，所以之后要重建索引 —— 下面的按钮已经带上了。
+        </div>
+      </div>
+
+      <div class="card col">
+        <h3>新建分支</h3>
+        <div class="row">
+          <input id="nbname" placeholder="分支名，如 refactor-xspeak（字母数字和 . _ - /）" style="flex:1">
+          <button class="primary" onclick="branchCreate()">创建并切换</button>
+        </div>
+        <div class="muted">从当前分支的最新状态开叉。未提交的改动会先自动提交，不会丢。</div>
+      </div>
+
+      <div class="card col">
+        <h3>分支列表</h3>
+        <div class="muted">按最后提交时间排序。当前分支标 ●</div>
+        <div id="branchlist"></div>
+      </div>
+
+      <pre class="out" id="brout"></pre>
+    </section>
+
     <!-- MCP -->
     <section id="v-mcp" class="hidden">
       <div class="card col">
         <h3>把知识库挂到 AI agent</h3>
         <div class="muted">先在「API Key」页创建一个 Key，然后按下面配置。10 个工具：memory_search / memory_get / memory_write / memory_update / memory_delete / memory_restore / memory_bootstrap / memory_list_libraries / memory_list_docs / memory_history。</div>
-        <div class="muted" style="margin-top:8px">Claude Desktop / Cursor（HTTP 方式）：</div>
+        <div class="muted" style="margin-top:10px">
+          这是<b>远程 HTTP 服务</b>（一直在服务器上跑），不是本地程序。所以配置里只需要 URL，
+          <b>不要写 <code class="key">command</code></b>。写了会让客户端按"启动本地进程"处理，
+          报 <code class="key">program path has no file name</code>。
+        </div>
+
+        <div class="muted" style="margin-top:14px"><b>Codex CLI</b> — 只认 TOML，改 <code class="key">~/.codex/config.toml</code>（Windows：<code class="key">C:\Users\你的用户名\.codex\config.toml</code>）：</div>
+        <pre class="out" id="mcptoml"></pre>
+        <div class="muted">
+          <code class="key">http_headers</code> 必须是独立的一段，不能内联进上面那段。
+          验证：<code class="key">codex mcp get memorys</code> 应显示 <code class="key">transport: streamable_http</code>。
+          Codex 不读 <code class="key">.mcp.json</code>（实测过，各种开关都不行）。
+        </div>
+
+        <div class="muted" style="margin-top:14px"><b>Claude Desktop / Cursor / VS Code</b> — 用 JSON：</div>
         <pre class="out" id="mcpcfg"></pre>
-        <div class="muted">Hermes / 其他支持 streamable HTTP 的客户端：URL = <code class="key" id="mcpurl"></code>，鉴权头 <code class="key">X-Api-Key: hk_***</code></div>
+        <div class="muted">
+          放这里：Claude Desktop <code class="key">%APPDATA%\Claude\claude_desktop_config.json</code>；
+          Cursor <code class="key">.cursor/mcp.json</code>；VS Code <code class="key">.vscode/mcp.json</code>。
+        </div>
+
+        <div class="muted" style="margin-top:14px"><b>Hermes</b> — 用 CLI 写，别手改 config.yaml：</div>
+        <pre class="out" id="mcphermes"></pre>
+
+        <div class="muted" style="margin-top:14px">
+          手工验证端点（URL 尾斜杠可有可无，两种都通）：
+        </div>
+        <pre class="out" id="mcpcurl"></pre>
+        <div class="muted">
+          认证只认 <code class="key">X-Api-Key</code>。用 <code class="key">Authorization: Bearer &lt;api key&gt;</code> 会 401
+          —— Bearer 那条通道是给网页登录的 JWT 用的。
+        </div>
       </div>
       <div class="card col">
         <h3>REST API</h3>
@@ -288,12 +350,34 @@ async function boot(){
     $('#who').textContent = (me.displayName||me.username)+' · '+me.username;
     $('#login').classList.add('hidden'); $('#appview').classList.remove('hidden');
     const MCPURL = location.origin + BASE + '/mcp';
-    $('#mcpurl').textContent = MCPURL;
-    $('#mcpcfg').textContent = JSON.stringify({mcpServers:{memorys:{type:"http",url:MCPURL,headers:{"X-Api-Key":"hk_你的key"}}}},null,2);
+    const KEYPH = 'hk_把你的key粘到这里';
+    // Codex：TOML，且 http_headers 必须是独立段。绝对不能出现 command。
+    $('#mcptoml').textContent =
+      '[mcp_servers.memorys]\n' +
+      'url = "' + MCPURL + '"\n\n' +
+      '[mcp_servers.memorys.http_headers]\n' +
+      'X-Api-Key = "' + KEYPH + '"';
+    // Claude Desktop / Cursor / VS Code：JSON
+    $('#mcpcfg').textContent = JSON.stringify(
+      {mcpServers:{memorys:{type:"http",url:MCPURL,headers:{"X-Api-Key":KEYPH}}}}, null, 2);
+    // Hermes：走 CLI
+    $('#mcphermes').textContent =
+      'hermes config set mcp_servers.memorys.url ' + MCPURL + '\n' +
+      'hermes config set mcp_servers.memorys.headers.X-Api-Key ' + KEYPH + '\n' +
+      'hermes config set mcp_servers.memorys.timeout 120\n' +
+      'hermes mcp test memorys';
+    $('#mcpcurl').textContent =
+      "curl -X POST '" + MCPURL + "' \\\n" +
+      "  -H 'X-Api-Key: " + KEYPH + "' \\\n" +
+      "  -H 'Content-Type: application/json' \\\n" +
+      "  -H 'Accept: application/json, text/event-stream' \\\n" +
+      '  -d \'{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}\'';
     // 注意要带上 BASE 前缀：挂在 /mem 子路径时 location.origin 不含前缀，
-    // 直接替换会给出打不通的 curl 示例
+    // 直接替换会给出打不通的 curl 示例。
+    // 只替换 REST 示例那块：上面几块是 JS 动态生成的，已经带好了完整 URL，
+    // 再扫一遍虽然当前无害，但以后示例里出现 BASE 字样就会被误替换。
     const ROOT = location.origin + BASE;
-    $('#v-mcp').querySelectorAll('pre.out').forEach(p=>p.textContent=p.textContent.replaceAll('BASE',ROOT));
+    $('#v-mcp').querySelectorAll('pre.out:not([id])').forEach(p=>p.textContent=p.textContent.replaceAll('BASE',ROOT));
     const dl = $('#docslink'); if(dl){ dl.href = BASE + '/api/docs'; dl.textContent = BASE + '/api/docs'; }
     await loadLibs(); nav('search');
   }catch(e){ logout(); }
@@ -301,13 +385,14 @@ async function boot(){
 
 /* 导航 */
 function nav(v){
-  ['search','list','edit','bootstrap','trash','keys','sync','mcp'].forEach(x=>{
+  ['search','list','edit','bootstrap','trash','keys','sync','branch','mcp'].forEach(x=>{
     $('#v-'+x).classList.toggle('hidden', x!==v);
   });
   document.querySelectorAll('.navitem').forEach(n=>n.classList.toggle('on', n.dataset.v===v));
   if(v==='list') loadList();
   if(v==='trash') loadTrash();
   if(v==='keys') loadKeys();
+  if(v==='branch') loadBranches();
 }
 
 async function loadLibs(){
@@ -505,6 +590,107 @@ async function doPush(){
     $('#syncout').textContent=JSON.stringify(d,null,2);
     toast(d.ok?'已推送到 GitHub':'推送失败，看输出', !d.ok);
   }catch(e){ $('#syncout').textContent=e.message; toast(e.message,1); }
+}
+
+/* ---- 分支 ---- */
+function brOut(d){ $('#brout').textContent = typeof d==='string'?d:JSON.stringify(d,null,2); }
+
+async function loadBranches(){
+  $('#branchlist').innerHTML='<div class="muted">加载中…</div>';
+  try{
+    const d = await api('/api/v1/branches');
+    $('#curbranch').textContent = '● ' + d.current;
+    $('#dirtyflag').textContent = d.dirty ? '有未提交的改动（切换/合并前会自动提交）' : '工作区干净';
+    if(!d.branches.length){ $('#branchlist').innerHTML='<div class="muted">还没有任何提交，写一篇记忆后就会出现主分支。</div>'; return; }
+    // 分支名走 data-br 属性 + 事件委托，不拼进 onclick 字符串：
+    // H() 不转义单引号，分支名一旦含 ' 就会把 onclick 撑开。后端虽然校验了字符集，
+    // 前端也不该把安全性押在"上游一定干净"上。
+    $('#branchlist').innerHTML = d.branches.map(b=>{
+      const cur = b.current;
+      const acts = cur
+        ? '<span class="muted">当前分支</span>'
+        : `<button data-act="switch" data-br="${H(b.name)}">切换到此</button>
+           <button data-act="merge" data-br="${H(b.name)}">合并进 ${H(d.current)}</button>
+           <button class="danger" data-act="del" data-br="${H(b.name)}">删除</button>`;
+      return `<div class="card" style="margin:6px 0;${cur?'border-color:#4a9;':''}">
+        <div class="row" style="justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+          <div class="col" style="gap:2px">
+            <div><b>${cur?'● ':''}${H(b.name)}</b> <code class="key">${H(b.hash)}</code></div>
+            <div class="muted">${H(b.subject)} · ${H(b.date.slice(0,19))}</div>
+          </div>
+          <div class="row" style="gap:6px">${acts}</div>
+        </div></div>`;
+    }).join('');
+  }catch(e){ $('#branchlist').innerHTML='<div class="muted">'+H(e.message)+'</div>'; }
+}
+
+$('#nbname').addEventListener('keydown', e=>{ if(e.key==='Enter') branchCreate(); });
+
+$('#branchlist').addEventListener('click', e=>{
+  const btn = e.target.closest('button[data-act]');
+  if(!btn) return;
+  const name = btn.dataset.br;
+  ({switch: branchSwitch, merge: branchMerge, del: branchDelete})[btn.dataset.act](name);
+});
+
+async function branchCreate(){
+  const name = $('#nbname').value.trim();
+  if(!name){ toast('请输入分支名',1); return; }
+  brOut('创建中…');
+  try{
+    const d = await api('/api/v1/branches',{method:'POST',body:JSON.stringify({name,switch:true})});
+    brOut(d); toast(d.message||'已创建'); $('#nbname').value='';
+    await loadBranches();
+  }catch(e){ brOut(e.message); toast(e.message,1); }
+}
+
+// 切换/合并都会改动磁盘 md，所以顺手重建索引，否则搜出来的还是旧内容
+async function reindexQuiet(){
+  try{ await api('/api/v1/sync',{method:'POST',body:JSON.stringify({action:'reindex'})}); return true; }
+  catch(e){ return false; }
+}
+
+async function branchSwitch(name){
+  if(!confirm(`切换到分支 ${name}？\n\n磁盘上的 md 会换成该分支的内容，索引会自动重建。`)) return;
+  brOut('切换中…');
+  try{
+    const d = await api('/api/v1/branches/switch',{method:'POST',body:JSON.stringify({name})});
+    const ok = await reindexQuiet();
+    brOut(Object.assign({}, d, {reindexed: ok}));
+    toast(ok?`已切到 ${name}，索引已重建`:`已切到 ${name}，但索引重建失败，请去同步页手动重建`, !ok);
+    await loadBranches(); await loadLibs();
+  }catch(e){ brOut(e.message); toast(e.message,1); }
+}
+
+async function branchMerge(name){
+  if(!confirm(`把 ${name} 合并进当前分支？\n\n有冲突会自动回滚，不会留下半成品。`)) return;
+  brOut('合并中…');
+  try{
+    const d = await api('/api/v1/branches/merge',{method:'POST',body:JSON.stringify({name})});
+    if(d.ok){
+      const ok = await reindexQuiet();
+      brOut(Object.assign({}, d, {reindexed: ok}));
+      toast(ok?d.message:'已合并，但索引重建失败，请去同步页手动重建', !ok);
+    }else{
+      brOut(d); toast('合并有冲突，已回滚', 1);
+    }
+    await loadBranches(); await loadLibs();
+  }catch(e){ brOut(e.message); toast(e.message,1); }
+}
+
+async function branchDelete(name){
+  if(!confirm(`删除分支 ${name}？\n\n只删分支指针，已合并的内容不受影响。`)) return;
+  brOut('删除中…');
+  try{
+    let d = await api('/api/v1/branches/'+encodeURIComponent(name),{method:'DELETE'});
+    if(!d.ok && /not fully merged/.test(d.error||'')){
+      if(confirm(`${name} 还有没合并进主线的提交。\n\n强制删除会永久丢掉这些内容，确定吗？`)){
+        d = await api('/api/v1/branches/'+encodeURIComponent(name)+'?force=true',{method:'DELETE'});
+      }else{ brOut(d); return; }
+    }
+    brOut(d); toast(d.ok?(d.message||'已删除'):'删除失败', !d.ok);
+    await loadBranches();
+  }catch(e){ brOut(e.message); toast(e.message,1); }
 }
 
 if(S.token) boot();

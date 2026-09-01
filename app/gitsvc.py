@@ -1,6 +1,7 @@
 """git 版本化：每用户一个 repo（/var/lib/memorys/data/users/uN）。
 写入即提交（失败不阻断主流程），sync 负责推 GitHub 长期备份。
 """
+import re
 import subprocess
 from pathlib import Path
 
@@ -129,6 +130,111 @@ def sync_to_github(root: Path, user_id: int) -> dict:
                 "message": f"已推送到 {url} 分支 {branch}"}
     except Exception as e:
         return {"ok": False, "remote": url, "branch": branch, "error": str(e)[:400]}
+
+
+# ---- 分支管理（供 Web UI 图形化操作）----
+# 场景：想整理/重构记忆但不想动主线，就开个分支改，满意了再合回来。
+# 分支名做严格白名单校验：这些值最终会拼进 git 命令，不能让用户输入自由发挥。
+_BRANCH_OK = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,80}$")
+
+
+def _valid_branch(name: str) -> str:
+    """校验分支名，非法直接抛。挡掉 `--flag`、`..`、`@{`、空格等 git 特殊语义。"""
+    name = (name or "").strip()
+    if not _BRANCH_OK.match(name):
+        raise ValueError("分支名只允许字母数字和 . _ - /，且需以字母数字开头")
+    if ".." in name or name.endswith("/") or name.endswith(".lock") or "@{" in name:
+        raise ValueError("分支名含 git 保留写法（.. / 结尾 / .lock / @{）")
+    return name
+
+
+def current_branch(root: Path) -> str:
+    return _git(root, "rev-parse", "--abbrev-ref", "HEAD", check=False) or settings.sync_branch
+
+
+def list_branches(root: Path) -> dict:
+    """列出本地分支 + 每个分支的最后一次提交，标出当前分支。"""
+    cur = current_branch(root)
+    out = _git(root, "for-each-ref", "--sort=-committerdate", "refs/heads/",
+               "--format=%(refname:short)|%(objectname:short)|%(committerdate:iso)|%(contents:subject)",
+               check=False)
+    items = []
+    for line in (out or "").split("\n"):
+        parts = line.split("|", 3)
+        if len(parts) == 4:
+            items.append({"name": parts[0], "hash": parts[1], "date": parts[2],
+                          "subject": parts[3], "current": parts[0] == cur})
+    return {"current": cur, "branches": items, "dirty": has_changes(root)}
+
+
+def create_branch(root: Path, name: str, switch: bool = True) -> dict:
+    """从当前 HEAD 开新分支。默认建完就切过去。"""
+    name = _valid_branch(name)
+    existing = {b["name"] for b in list_branches(root)["branches"]}
+    if name in existing:
+        raise ValueError(f"分支 {name} 已存在")
+    # 未提交的改动先落一笔，否则切分支会把它们带过去，造成归属混乱
+    try_commit_all(root, "wip: 建分支前自动保存")
+    _git(root, "branch", "--", name)
+    if switch:
+        _git(root, "checkout", name)
+    return {"ok": True, "branch": name, "current": current_branch(root),
+            "message": f"已创建分支 {name}" + ("并切换过去" if switch else "")}
+
+
+def switch_branch(root: Path, name: str) -> dict:
+    """切分支。切之前把未提交改动提交掉，避免脏工作区导致 checkout 失败或串味。"""
+    name = _valid_branch(name)
+    existing = {b["name"] for b in list_branches(root)["branches"]}
+    if name not in existing:
+        raise ValueError(f"分支 {name} 不存在")
+    try_commit_all(root, "wip: 切分支前自动保存")
+    _git(root, "checkout", name)
+    return {"ok": True, "branch": name, "current": current_branch(root),
+            "message": f"已切换到 {name}",
+            "note": "md 文件已按该分支内容换过，记得在「同步」页重建索引。"}
+
+
+def merge_branch(root: Path, name: str, message: str = "") -> dict:
+    """把指定分支合进当前分支。冲突不自动解决，回滚后报错让人工处理。"""
+    name = _valid_branch(name)
+    cur = current_branch(root)
+    if name == cur:
+        raise ValueError("不能把分支合并到它自己")
+    try_commit_all(root, "wip: 合并前自动保存")
+    p = subprocess.run(
+        ["git", "-C", str(root), "merge", "--no-ff", "-m",
+         message or f"merge: {name} → {cur}", name],
+        capture_output=True, text=True, timeout=60,
+    )
+    if p.returncode != 0:
+        err = ((p.stderr or "") + (p.stdout or "")).strip()[-400:]
+        # 合并失败大概率是冲突，先把工作区恢复干净，别把半成品留给用户
+        subprocess.run(["git", "-C", str(root), "merge", "--abort"],
+                       capture_output=True, timeout=30)
+        return {"ok": False, "branch": name, "current": cur, "error": err,
+                "hint": "合并有冲突，已自动回滚。请在服务器上手工处理，或改为逐篇复制内容。"}
+    return {"ok": True, "branch": name, "current": cur,
+            "message": f"已把 {name} 合并进 {cur}",
+            "note": "内容有变，记得在「同步」页重建索引。"}
+
+
+def delete_branch(root: Path, name: str, force: bool = False) -> dict:
+    """删分支。默认拒删未合并的分支（git -d 的语义），force 才用 -D。"""
+    name = _valid_branch(name)
+    if name == current_branch(root):
+        raise ValueError("不能删除当前所在分支，请先切到别的分支")
+    if name == settings.sync_branch:
+        raise ValueError(f"{settings.sync_branch} 是主分支，不允许删除")
+    p = subprocess.run(["git", "-C", str(root), "branch", "-D" if force else "-d", name],
+                       capture_output=True, text=True, timeout=30)
+    if p.returncode != 0:
+        err = (p.stderr or "").strip()[-300:]
+        out = {"ok": False, "branch": name, "error": err}
+        if "not fully merged" in err:
+            out["hint"] = "该分支还有没合并的提交，删了内容就丢了。确认要丢就勾选「强制删除」。"
+        return out
+    return {"ok": True, "branch": name, "message": f"已删除分支 {name}"}
 
 
 def pull_from_github(root: Path, user_id: int) -> dict:

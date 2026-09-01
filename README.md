@@ -59,8 +59,13 @@ jieba 分词 → `tsvector` 关键词召回；`pg_trgm` 相似度兜底错别字
 ## MCP 接入
 
 先在 Web UI 的「API Key」页建一个 key，然后配到客户端。
+Web UI 的「MCP 配置」页会把下面这些样例连同真实 URL 一起渲染出来，可以直接复制。
 
-Claude Desktop / Cursor：
+**这是远程 HTTP 服务，不是本地程序，所以配置里只有 URL，没有 `command`。**
+写了 `command`（哪怕是空串）客户端就会按"启动本地进程"处理，报
+`program path has no file name`。这是最常见的配错方式。
+
+Claude Desktop / Cursor / VS Code — JSON：
 
 ```json
 {
@@ -73,6 +78,44 @@ Claude Desktop / Cursor：
   }
 }
 ```
+
+放置位置：Claude Desktop `%APPDATA%\Claude\claude_desktop_config.json`；
+Cursor `.cursor/mcp.json`；VS Code `.vscode/mcp.json`。
+
+**Codex CLI 只认 TOML**，改 `~/.codex/config.toml`：
+
+```toml
+[mcp_servers.memorys]
+url = "https://repo.xlingo.fun/mcp"
+
+[mcp_servers.memorys.http_headers]
+X-Api-Key = "hk_你的key"
+```
+
+`http_headers` 必须是独立的一段，不能内联进上面那段（内联会报 `invalid transport`）。
+`codex mcp get memorys` 应显示 `transport: streamable_http`。
+
+Codex 的实测边界（0.151.0）：
+
+| 写法 | 结果 |
+|---|---|
+| 只有 `url` | ✅ |
+| `url` + `[...http_headers]` | ✅ |
+| `url` + `command = ""` | ❌ 配置直接加载失败 |
+| 只有 `command = ""` | ⚠️ 配置能过，启动时报 `program path has no file name` |
+| `url` + `args` | ❌ 配置加载失败（别混入 stdio 字段） |
+| `.mcp.json` | ❌ Codex 不读，试过 7 种开关都不行 |
+
+Hermes — 用 CLI 写，别手改 config.yaml：
+
+```bash
+hermes config set mcp_servers.memorys.url https://repo.xlingo.fun/mcp
+hermes config set mcp_servers.memorys.headers.X-Api-Key hk_你的key
+hermes mcp test memorys      # 应报 ✓ Connected + Tools discovered: 10
+```
+
+认证只吃 `X-Api-Key`。`Authorization: Bearer <api key>` 会 401 —— Bearer 那条通道
+是给网页登录的 JWT 用的，两者不通用。URL 尾斜杠可有可无（`McpSlashMiddleware` 已兜住）。
 
 10 个工具：
 
@@ -144,6 +187,33 @@ curl -X POST -H "X-Api-Key: $KEY" https://repo.xlingo.fun/api/v1/sync        # �
 curl -X POST -H "X-Api-Key: $KEY" https://repo.xlingo.fun/api/v1/sync/push   # 推 GitHub 备份
 ```
 
+### 分支（Web UI「🌿 分支」页）
+
+想大改记忆又不想动主线时用。每个用户的 repo 独立，分支只在自己库内。
+
+```
+GET    /api/v1/branches                     列出分支 + 当前分支 + 工作区是否干净
+POST   /api/v1/branches         {name,switch}   建（默认建完就切）
+POST   /api/v1/branches/switch  {name}          切
+POST   /api/v1/branches/merge   {name,message}  把 name 合进当前分支
+DELETE /api/v1/branches/{name}[?force=true]     删
+```
+
+三个设计取舍：
+
+**切换/合并前自动 commit**。脏工作区切分支会把未提交改动带过去，造成内容归属混乱；
+自动落一笔 `wip:` 提交最省心，也不会丢东西。
+
+**切换/合并后必须重建索引**。这两个操作直接改磁盘上的 md，PG 里还是旧的。
+UI 已经自动接上 reindex；走 REST 的话要自己补一次 `POST /api/v1/sync {"action":"reindex"}`。
+
+**合并冲突不自动解决**。失败就 `merge --abort` 回滚，返回 hint 让人工处理，
+绝不留半成品在工作区。
+
+分支名走白名单校验（`^[A-Za-z0-9][A-Za-z0-9._/-]{0,80}$`，额外挡掉 `..`、`@{`、
+`/` 结尾、`.lock` 结尾）。这些值要拼进 git 命令，`--force` 之类的输入必须挡在门外。
+主分支和当前所在分支不允许删除。
+
 ### GitHub 备份（可选，未启用）
 
 `.env` 里已配 `MEM_GITHUB_REMOTE=git@github.com:xiaocqaq/memorys-data.git`，但仓库还没建，所以推送会返回 `ok:false` 并提示。本机 SSH 免密已通（账号 `xiaocqaq`），去 GitHub 建一个同名私有空仓库就能用。
@@ -152,7 +222,7 @@ curl -X POST -H "X-Api-Key: $KEY" https://repo.xlingo.fun/api/v1/sync/push   # �
 
 ## 测试
 
-一键跑全部七套 + 服务状态 + 公网端点 + Hermes 侧闭环：
+一键跑全部八套 + 服务状态 + 公网端点 + Hermes 侧闭环：
 
 ```bash
 bash /opt/memorys/tests/acceptance.sh
@@ -169,6 +239,7 @@ cd /opt/memorys && export PYTHONPATH=/opt/memorys
 .venv/bin/python tests/upstream_token_test.py   # 上游 token 路径 9 项
 .venv/bin/python tests/public_mcp_test.py "$(cat /root/.memorys-hermes-key)"  # 公网 MCP 6 项
 .venv/bin/python tests/git_push_test.py         # GitHub 备份链路 13 项（本地 bare 仓库，不碰真远端）
+.venv/bin/python tests/branch_test.py           # 分支管理 23 项（建/切/合/删 + 非法输入）
 
 # 把任意一套指向公网域名
 MEM_TEST_BASE=https://repo.xlingo.fun .venv/bin/python tests/e2e_test.py
@@ -215,3 +286,10 @@ DB 和磁盘要一起清。只清 DB 会留下孤儿 md，下次 `sync` 会被�
 13. 检索加了 `PER_DOC_CAP = 2`，避免一篇长文档吃满整个结果集，命中不足时再 spill 补齐。
 14. 断言别依赖失败文案。`memory_search` 命中时返回结构化 JSON，"没有命中"只在 0 命中时出现，写 `"命中" in text` 会永远为真。
 15. 测试标题要带时间戳后缀，否则第二轮跑会撞 409 duplicate。
+16. **反向断言（"这个查询不该命中"）不能打真实库**。`recall_public.py` 里曾用「养猫要注意什么」，
+    后来库里进了一篇带「工作区注意事项」的技术文档，「注意」真实命中 → 断言误报失败。
+    打真实库的反向用例要选库里绝不会出现的词（`孜然羊肉`、`演唱会门票`）；
+    对固定样例常量断言的单测（`search_unit_test.py`）才可以用通用词。
+17. **切分支/合并后一定要 reindex**。md 换了但 PG 索引没换，会搜到已经不在磁盘上的内容。
+18. 分支名会拼进 git 命令，必须白名单校验。`--force`、`a..b`、`x@{1}` 这类输入
+    不挡住就会变成 git 的 flag 或保留语法。

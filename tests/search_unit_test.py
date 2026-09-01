@@ -75,6 +75,9 @@ def main():
                   "MCP 怎么接入", "服务监听哪个端口", "怎么鉴权"]:
         ov = set(tokenize(query)).intersection(s)
         check(f"概念查询命中：{query}", bool(ov), f"重叠={ov}")
+    # 这里对固定的 DOC 常量断言，所以「养猫要注意什么」是安全的
+    # （DOC 里没有「注意」）。打真实库的 recall_public.py 就不能这么写——
+    # 库里随时会进一篇带「注意事项」的技术文档，导致真命中被误判为失败。
     for query in ["养猫要注意什么", "今天天气怎么样", "股票行情"]:
         ov = set(tokenize(query)).intersection(s)
         check(f"无关查询不命中：{query}", not ov, f"重叠={ov}")

@@ -286,6 +286,58 @@ async def sync_push(ctx: AuthContext = Depends(auth)):
     return gitsvc.sync_to_github(root, ctx.user.id)
 
 
+# ---------- git 分支 ----------
+# 用途：想大改记忆又不想动主线时，开分支改，满意再合。
+# 每个用户只能操作自己的 repo（root 由 user_id 推出，前端传不了别人的路径）。
+def _repo(ctx: AuthContext):
+    from . import gitsvc
+    return gitsvc, gitsvc.ensure_repo(settings.data_dir, ctx.user.id)
+
+
+@app.get("/api/v1/branches")
+async def branches(ctx: AuthContext = Depends(auth)):
+    gitsvc, root = _repo(ctx)
+    return gitsvc.list_branches(root)
+
+
+@app.post("/api/v1/branches")
+async def branch_create(payload: dict, ctx: AuthContext = Depends(auth)):
+    gitsvc, root = _repo(ctx)
+    try:
+        return gitsvc.create_branch(root, payload.get("name", ""),
+                                    switch=bool(payload.get("switch", True)))
+    except ValueError as e:
+        raise HTTPException(400, detail=str(e))
+
+
+@app.post("/api/v1/branches/switch")
+async def branch_switch(payload: dict, ctx: AuthContext = Depends(auth)):
+    gitsvc, root = _repo(ctx)
+    try:
+        return gitsvc.switch_branch(root, payload.get("name", ""))
+    except ValueError as e:
+        raise HTTPException(400, detail=str(e))
+
+
+@app.post("/api/v1/branches/merge")
+async def branch_merge(payload: dict, ctx: AuthContext = Depends(auth)):
+    gitsvc, root = _repo(ctx)
+    try:
+        return gitsvc.merge_branch(root, payload.get("name", ""),
+                                   payload.get("message", ""))
+    except ValueError as e:
+        raise HTTPException(400, detail=str(e))
+
+
+@app.delete("/api/v1/branches/{name:path}")
+async def branch_delete(name: str, force: bool = False, ctx: AuthContext = Depends(auth)):
+    gitsvc, root = _repo(ctx)
+    try:
+        return gitsvc.delete_branch(root, name, force=force)
+    except ValueError as e:
+        raise HTTPException(400, detail=str(e))
+
+
 # ---------- 健康检查 ----------
 @app.get("/api/health")
 async def health():

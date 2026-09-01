@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# memorys 全量验收：七套测试（单测本地 + 其余打公网 HTTPS）+ 服务状态 + 公网端点 + Hermes 侧闭环
+# memorys 全量验收：八套测试（单测本地 + 其余打公网 HTTPS）+ 服务状态 + 公网端点 + Hermes 侧闭环
 cd /opt/memorys || exit 1
 export PYTHONPATH=/opt/memorys
 export MEM_TEST_BASE=https://repo.xlingo.fun
@@ -20,6 +20,7 @@ run mcp_test            .venv/bin/python tests/mcp_test.py
 run upstream_token_test .venv/bin/python tests/upstream_token_test.py
 run public_mcp_test     .venv/bin/python tests/public_mcp_test.py "$KEY"
 run git_push_test       .venv/bin/python tests/git_push_test.py
+run branch_test         .venv/bin/python tests/branch_test.py
 
 echo
 echo "===== 服务 / 自启 ====="
