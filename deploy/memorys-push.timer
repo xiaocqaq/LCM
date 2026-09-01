@@ -1,0 +1,12 @@
+[Unit]
+Description=每天凌晨 1 点把 memorys 推到 GitHub
+
+[Timer]
+OnCalendar=*-*-* 01:00:00
+# 随机延迟 3 分钟：整点是各类定时任务的高峰，错开一点避免抢网络和 CPU
+RandomizedDelaySec=180
+# 机器关机或服务没起时错过了，开机后补跑一次，不然一停机就断档
+Persistent=true
+
+[Install]
+WantedBy=timers.target

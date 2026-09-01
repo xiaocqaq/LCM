@@ -249,9 +249,51 @@ MCP：`memory_write(..., branch="draft")`。
 同一分支上重复写同路径会识别成 update 并保留原 `created_at`。
 目标分支写成当前分支会返回 400（那种情况直接正常保存即可）。
 
-### GitHub 备份（可选，未启用）
+### GitHub 备份（已启用）
 
-`.env` 里已配 `MEM_GITHUB_REMOTE=git@github.com:xiaocqaq/memorys-data.git`，但仓库还没建，所以推送会返回 `ok:false` 并提示。本机 SSH 免密已通（账号 `xiaocqaq`），去 GitHub 建一个同名私有空仓库就能用。
+远端 `git@github.com:xiaocqaq/memorys-data.git`（private），走 SSH 免密（账号 `xiaocqaq`）。
+每个用户推到自己的分支（`u<id>`），互不覆盖——见上文「分支」节的 `remote_for`/`branch_for`。
+
+手动推：Web UI「同步 / GitHub」页点「立即推送」，或 `POST /api/v1/sync/push`。
+
+**定时推送：每天 01:00**，systemd timer：
+
+```
+/etc/systemd/system/memorys-push.timer     # OnCalendar=01:00，RandomizedDelaySec=180，Persistent=true
+/etc/systemd/system/memorys-push.service   # oneshot
+/opt/memorys/deploy/memorys-push.sh        # 实际逻辑
+```
+
+```bash
+systemctl list-timers memorys-push.timer   # 看下次触发
+systemctl start memorys-push.service       # 手动触发一次
+journalctl -u memorys-push -n 30           # 看日志
+```
+
+UI 的「同步 / GitHub」页会显示下次推送时间和上次结果（读 `GET /api/v1/sync/schedule`，
+底层是 `systemctl show`）。
+
+三个设计取舍：
+
+**脚本走 REST 而不是直接 `git push`。** 推送逻辑在 `gitsvc.sync_to_github` 里
+（分支按用户隔离、`{uid}` 占位符替换、`HEAD:refs/heads/<branch>` 的写法）。
+绕过它自己拼 git 命令就有两份逻辑，将来改一处忘一处。走 REST 打的是同一个入口，
+行为和网页上点「立即推送」完全一致。
+
+**推送前先 reindex。** 直接改过磁盘上的 md 时，这一步能把改动带上。
+
+**失败不重试**（`Restart=no`）。timer 明天照常跑，重试只会刷满日志。
+`Persistent=true` 负责补跑：机器关机错过了，开机后会补一次，不然一停机就断档。
+
+多用户场景：key 写进 `/etc/memorys/push-keys`（每行一个，`#` 注释），
+脚本会逐个推。没有该文件时退回读 `/root/.memorys-hermes-key`。
+
+**验证备份真的可用**——别只看接口返回的 `ok:true`，从远端 clone 下来看：
+
+```bash
+git clone --depth 1 --branch u20 git@github.com:xiaocqaq/memorys-data.git /tmp/vfy
+ls /tmp/vfy/main/ && head -8 /tmp/vfy/main/*.md
+```
 
 ---
 

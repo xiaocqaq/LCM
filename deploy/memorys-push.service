@@ -1,0 +1,12 @@
+[Unit]
+Description=memorys 知识库推送到 GitHub（reindex → push）
+After=network-online.target memorys.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# SSH 免密：remote 是 git@github.com:...，BatchMode 保证不会卡在交互提示上
+Environment=GIT_SSH_COMMAND=ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new
+ExecStart=/usr/bin/bash /opt/memorys/deploy/memorys-push.sh
+# 失败不重试：timer 明天还会跑，重试只会刷日志
+Restart=no

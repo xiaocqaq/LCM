@@ -1,4 +1,5 @@
 """FastAPI 主应用：REST API + MCP（streamable HTTP）+ Web UI。"""
+import subprocess
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -297,6 +298,46 @@ async def sync_push(ctx: AuthContext = Depends(auth)):
     from . import gitsvc
     root = user_root(settings.data_dir, ctx.user.id)
     return gitsvc.sync_to_github(root, ctx.user.id)
+
+
+@app.get("/api/v1/sync/schedule")
+async def sync_schedule(ctx: AuthContext = Depends(auth)):
+    """读 systemd timer 状态，让 UI 能显示下次推送时间和上次结果。
+
+    只读 systemctl show 的几个字段，不接受任何用户输入 —— 单元名是写死的常量，
+    没有注入面。timer 没装时返回 installed=false，UI 给出安装指引。
+    """
+    unit = "memorys-push.timer"
+    try:
+        p = subprocess.run(
+            ["systemctl", "show", unit, "--no-pager",
+             "--property=LoadState,ActiveState,NextElapseUSecRealtime,LastTriggerUSec"],
+            capture_output=True, text=True, timeout=10)
+        kv = dict(l.split("=", 1) for l in p.stdout.strip().split("\n") if "=" in l)
+        if kv.get("LoadState") != "loaded":
+            return {"installed": False,
+                    "hint": "定时推送未安装。在服务器执行："
+                            "install -m644 /opt/memorys/deploy/memorys-push.{service,timer} "
+                            "/etc/systemd/system/ && systemctl daemon-reload && "
+                            "systemctl enable --now memorys-push.timer"}
+        # 上次运行结果单独查 service（timer 只记触发时间，不记成败）
+        s = subprocess.run(
+            ["systemctl", "show", "memorys-push.service", "--no-pager",
+             "--property=ExecMainStatus,ExecMainExitTimestamp,Result"],
+            capture_output=True, text=True, timeout=10)
+        skv = dict(l.split("=", 1) for l in s.stdout.strip().split("\n") if "=" in l)
+        return {
+            "installed": True,
+            "active": kv.get("ActiveState") == "active",
+            "next": kv.get("NextElapseUSecRealtime") or "",
+            "last_trigger": kv.get("LastTriggerUSec") or "",
+            "last_result": skv.get("Result") or "",
+            "last_exit": skv.get("ExecMainStatus") or "",
+            "last_finished": skv.get("ExecMainExitTimestamp") or "",
+            "schedule": "每天 01:00（随机延迟 0-3 分钟）",
+        }
+    except Exception as e:
+        return {"installed": False, "error": str(e)[:200]}
 
 
 # ---------- git 分支 ----------

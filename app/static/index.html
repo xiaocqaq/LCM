@@ -258,6 +258,10 @@ code.key{background:#0d1320;border:1px solid var(--line);padding:3px 8px;border-
         <div class="muted">需先在服务器 .env 配置 GITHUB_REMOTE（git@github.com:xxx/xxx.git）。</div>
         <button class="primary" onclick="doPush()">立即推送</button>
       </div>
+      <div class="card col">
+        <h3>定时推送</h3>
+        <div id="pushsched" class="muted">读取中…</div>
+      </div>
       <pre class="out" id="syncout"></pre>
     </section>
 
@@ -451,6 +455,7 @@ function nav(v){
   if(v==='trash') loadTrash();
   if(v==='keys') loadKeys();
   if(v==='branch') loadBranches();
+  if(v==='sync') loadSchedule();
 }
 
 /* 侧栏列项目（不是库）。库实际上基本只有 main，列项目才有导航价值。
@@ -866,7 +871,29 @@ async function doPush(){
     const d = await api('/api/v1/sync/push',{method:'POST'});
     $('#syncout').textContent=JSON.stringify(d,null,2);
     toast(d.ok?'已推送到 GitHub':'推送失败，看输出', !d.ok);
+    loadSchedule();
   }catch(e){ $('#syncout').textContent=e.message; toast(e.message,1); }
+}
+
+async function loadSchedule(){
+  const el = $('#pushsched');
+  try{
+    const d = await api('/api/v1/sync/schedule');
+    if(!d.installed){
+      el.innerHTML = '定时推送未启用。<br><span style="font-size:12px">'
+        + H(d.hint || d.error || '') + '</span>';
+      return;
+    }
+    const ok = d.last_result === 'success' && d.last_exit === '0';
+    const last = d.last_finished
+      ? `上次 ${H(d.last_finished)} · ${ok?'✅ 成功':'⚠️ '+H(d.last_result||'失败')}`
+      : '还没跑过（装好后第一次要等到点）';
+    el.innerHTML = `计划：<b>${H(d.schedule)}</b> · ${d.active?'✅ 已启用':'⚠️ timer 未激活'}`
+      + `<br>下次：${H(d.next || '—')}`
+      + `<br>${last}`
+      + `<br><span style="font-size:12px">推送前会先重建索引，手工改过 md 也能带上。`
+      + `失败不重试，第二天照常跑。服务器上看日志：<code class="key">journalctl -u memorys-push -n 30</code></span>`;
+  }catch(e){ el.textContent = '读取失败：' + e.message; }
 }
 
 /* ---- 分支 ---- */
