@@ -222,23 +222,37 @@ code.key{background:#0d1320;border:1px solid var(--line);padding:3px 8px;border-
     <section id="v-branch" class="hidden">
       <div class="card col">
         <h3>当前分支</h3>
-        <div class="row" style="align-items:center">
-          <code class="key" id="curbranch" style="font-size:15px">…</code>
+        <div class="row" style="align-items:center;flex-wrap:wrap;gap:10px">
+          <select id="brsel" style="width:auto;min-width:170px;max-width:340px"></select>
           <span class="muted" id="dirtyflag"></span>
         </div>
         <div class="muted">
-          想大改记忆又怕搞乱主线，就开个分支改，满意了再合回来，不想要就删掉。
-          切换和合并<b>会改变磁盘上的 md 文件</b>，所以之后要重建索引 —— 下面的按钮已经带上了。
+          直接下拉切换分支。想大改记忆又怕搞乱主线，就开个分支改，满意了再合回来，不想要就删掉。
+          切换和合并<b>会改变磁盘上的 md 文件</b>，之后需要重建索引 —— 这一步已经自动带上了。
         </div>
       </div>
 
       <div class="card col">
         <h3>新建分支</h3>
         <div class="row">
-          <input id="nbname" placeholder="分支名，如 refactor-xspeak（字母数字和 . _ - /）" style="flex:1">
+          <input id="nbname" placeholder="分支名，如 refactor-xspeak" style="flex:1">
           <button class="primary" onclick="branchCreate()">创建并切换</button>
         </div>
-        <div class="muted">从当前分支的最新状态开叉。未提交的改动会先自动提交，不会丢。</div>
+        <div class="muted">
+          从当前分支的最新状态开叉，未提交的改动会先自动提交，不会丢。
+          分支名只能用字母数字和 <code class="key">. _ - /</code>，需以字母数字开头。
+        </div>
+      </div>
+
+      <div class="card col">
+        <h3>合并分支</h3>
+        <div class="row" style="align-items:center;flex-wrap:wrap;gap:8px">
+          <select id="mgsel" style="width:auto;min-width:170px;max-width:340px"></select>
+          <span class="muted">合并进</span>
+          <code class="key" id="mgtarget">…</code>
+          <button class="primary" onclick="mergeSelected()">合并</button>
+        </div>
+        <div class="muted">有冲突会自动回滚，不会留下半成品。</div>
       </div>
 
       <div class="card col">
@@ -301,7 +315,7 @@ curl -X POST -H "X-Api-Key: mk_***" -H "Content-Type: application/json" \
 </div>
 
 <script>
-const S = {token:localStorage.getItem('mem_token')||'', user:null, doc:null, boot:''};
+const S = {token:localStorage.getItem('mem_token')||'', user:null, doc:null, boot:'', branch:''};
 const $ = s=>document.querySelector(s);
 const H = s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
@@ -599,8 +613,24 @@ async function loadBranches(){
   $('#branchlist').innerHTML='<div class="muted">加载中…</div>';
   try{
     const d = await api('/api/v1/branches');
-    $('#curbranch').textContent = '● ' + d.current;
+    S.branch = d.current;   // 下拉被用户取消时要回弹到这个值
     $('#dirtyflag').textContent = d.dirty ? '有未提交的改动（切换/合并前会自动提交）' : '工作区干净';
+
+    // 当前分支下拉：选中即切换
+    const sel = $('#brsel');
+    sel.innerHTML = d.branches.map(b=>
+      `<option value="${H(b.name)}"${b.current?' selected':''}>${b.current?'● ':''}${H(b.name)}</option>`
+    ).join('');
+
+    // 合并源下拉：排掉当前分支（不能合并到自己）
+    const others = d.branches.filter(b=>!b.current);
+    const mg = $('#mgsel');
+    mg.innerHTML = others.length
+      ? others.map(b=>`<option value="${H(b.name)}">${H(b.name)}</option>`).join('')
+      : '<option value="">（没有其他分支）</option>';
+    mg.disabled = !others.length;
+    $('#mgtarget').textContent = d.current;
+
     if(!d.branches.length){ $('#branchlist').innerHTML='<div class="muted">还没有任何提交，写一篇记忆后就会出现主分支。</div>'; return; }
     // 分支名走 data-br 属性 + 事件委托，不拼进 onclick 字符串：
     // H() 不转义单引号，分支名一旦含 ' 就会把 onclick 撑开。后端虽然校验了字符集，
@@ -609,8 +639,7 @@ async function loadBranches(){
       const cur = b.current;
       const acts = cur
         ? '<span class="muted">当前分支</span>'
-        : `<button data-act="switch" data-br="${H(b.name)}">切换到此</button>
-           <button data-act="merge" data-br="${H(b.name)}">合并进 ${H(d.current)}</button>
+        : `<button data-act="switch" data-br="${H(b.name)}">切到此分支</button>
            <button class="danger" data-act="del" data-br="${H(b.name)}">删除</button>`;
       return `<div class="card" style="margin:6px 0;${cur?'border-color:#4a9;':''}">
         <div class="row" style="justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
@@ -625,6 +654,22 @@ async function loadBranches(){
 }
 
 $('#nbname').addEventListener('keydown', e=>{ if(e.key==='Enter') branchCreate(); });
+
+/* 下拉切换分支。注意：select 的显示值会立刻变成用户选的那个，
+   但真正切换是异步的，用户取消确认或后端报错时必须把它回弹，
+   否则界面显示的分支和实际所在分支不一致 —— 这比切换失败本身更危险。 */
+$('#brsel').addEventListener('change', async e=>{
+  const target = e.target.value;
+  if(target === S.branch) return;
+  const ok = await branchSwitch(target);
+  if(!ok) e.target.value = S.branch;
+});
+
+function mergeSelected(){
+  const name = $('#mgsel').value;
+  if(!name){ toast('没有可合并的分支',1); return; }
+  branchMerge(name);
+}
 
 $('#branchlist').addEventListener('click', e=>{
   const btn = e.target.closest('button[data-act]');
@@ -650,8 +695,9 @@ async function reindexQuiet(){
   catch(e){ return false; }
 }
 
+// 返回 true/false：下拉切换要靠这个决定是否回弹 select
 async function branchSwitch(name){
-  if(!confirm(`切换到分支 ${name}？\n\n磁盘上的 md 会换成该分支的内容，索引会自动重建。`)) return;
+  if(!confirm(`切换到分支 ${name}？\n\n磁盘上的 md 会换成该分支的内容，索引会自动重建。`)) return false;
   brOut('切换中…');
   try{
     const d = await api('/api/v1/branches/switch',{method:'POST',body:JSON.stringify({name})});
@@ -659,7 +705,8 @@ async function branchSwitch(name){
     brOut(Object.assign({}, d, {reindexed: ok}));
     toast(ok?`已切到 ${name}，索引已重建`:`已切到 ${name}，但索引重建失败，请去同步页手动重建`, !ok);
     await loadBranches(); await loadLibs();
-  }catch(e){ brOut(e.message); toast(e.message,1); }
+    return true;
+  }catch(e){ brOut(e.message); toast(e.message,1); return false; }
 }
 
 async function branchMerge(name){
