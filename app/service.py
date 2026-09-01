@@ -317,7 +317,15 @@ def _doc_meta(doc: Document) -> dict:
 
 
 async def _reindex_document(session: AsyncSession, doc: Document, do_embed: bool = True) -> None:
-    """删旧 chunk，重切、重分词、可选 embedding，重插。"""
+    """删旧 chunk，重切、重分词、可选 embedding，重插。
+
+    ⚠️ `do_embed=False` 会让这篇文档**丢掉已有向量** —— 本函数是先 DELETE 整行
+    再重插，向量列跟着一起没。它只适合"文档内容真的变了、向量本来也该重算"
+    的场景（比如从磁盘 sync 出内容变化）。
+    如果只是想让改过的 _SYNONYMS 生效，用 tests/reindex_lex_only.py：
+    那个只 UPDATE tsv 列，不动 chunk 行。
+    （踩过：拿 do_embed=False 刷同义词，60 个向量被清空还没发现）
+    """
     await session.execute(delete(Chunk).where(Chunk.document_id == doc.id))
     pieces = split_chunks(doc.content)
     if not pieces:
@@ -684,7 +692,10 @@ async def sync_from_disk(session: AsyncSession, user: User) -> dict:
                 session.add(doc)
                 added += 1
             await session.flush()
-            await _reindex_document(session, doc, do_embed=False)
+            # 从磁盘 sync 走到这里说明内容真的变了（上面按 content_hash 比过），
+            # 所以向量也该重算。传 do_embed=True —— 早先写的 False 会让
+            # 每次 sync/reindex 静默清空全库向量，配上 embedding 后才暴露出来。
+            await _reindex_document(session, doc, do_embed=True)
     # DB 有但磁盘没了 → 软删
     disk_paths = set()
     for lib in lib_dirs:

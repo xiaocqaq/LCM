@@ -1,20 +1,20 @@
 EMBED_AVAILABLE=True  model=qwen3.7-text-embedding-flash  dim=1024  batch=25  timeout=30.0s
-清理孤儿 chunk（属于已删除文档）：190 行，剩 65
+清理孤儿 chunk（属于已删除文档）：0 行，剩 65
 
 共 10 篇活跃文档
 
-   1/10 ✅ 3/3 chunk     1.1s  memorys 上线记录
+   1/10 ✅ 3/3 chunk     1.0s  memorys 上线记录
    2/10 ✅ 3/3 chunk     0.3s  xspeak 项目架构
    3/10 ✅ 3/3 chunk     0.3s  TTS 选型决策
    4/10 ✅ 1/1 chunk     0.2s  引导时机：要在用户开口前
-   5/10 ⚠️ 部分 25/28 chunk   190.2s  frcws-service：cmos_base_account_detail
+   5/10 ⚠️ 部分 25/28 chunk   190.7s  frcws-service：cmos_base_account_detail
    6/10 ✅ 7/7 chunk     0.4s  Hermes Agent Bridge IPC socket 被清理后的恢复
    7/10 ✅ 5/5 chunk     0.4s  hs.xlingo.fun 自定义前端发布流程与当前生产状态（v0.7.15
    8/10 ⚠️ 部分 4/5 chunk   123.6s  陷阱：前端调 requireSuperAdmin 端点会触发全局 403 弹
    9/10 ✅ 6/6 chunk     0.4s  Windows 本地开发：行尾、jsdom realm 与测试构建命令
   10/10 ⚠️ 部分 3/4 chunk   123.5s  del_ad 分支定制清单与合上游后的固定动作
 
-总计 65 chunk，60 个有向量（92.3%），耗时 440.4s
+总计 65 chunk，60 个有向量（92.3%），耗时 441.0s
 ⚠️ 缺 5 个（上游随机超时导致）：
      3 条  frcws-service：cmos_base_account_detail 大数据查询优化上下文
      1 条  陷阱：前端调 requireSuperAdmin 端点会触发全局 403 弹窗风暴
