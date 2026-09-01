@@ -51,6 +51,37 @@ main{overflow:auto;padding:18px}
 .doc{cursor:pointer}
 .doc:hover{border-color:var(--accent)}
 .snippet{color:#b9c4da;background:#0d1320;border:1px solid var(--line);border-radius:10px;padding:10px;white-space:pre-wrap;max-height:120px;overflow:hidden;font-size:13px}
+/* 文件夹树（项目 → 类型 → 文档） */
+.tree{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:6px 4px 20px}
+.tnode{border-radius:9px}
+.trow{display:flex;align-items:center;gap:8px;padding:7px 10px;border-radius:9px;cursor:pointer;user-select:none}
+.trow:hover{background:var(--panel2)}
+/* 三角热区做到 20px，字形只有 10px 太难点 */
+.tcar{width:20px;flex:0 0 20px;color:var(--dim);font-size:10px;transition:transform .12s;text-align:center}
+.tcar.open{transform:rotate(90deg)}
+.tname{font-weight:600}
+.tcount{color:var(--dim);font-size:12px}
+.tkids{padding-left:15px;border-left:1px solid #26304a;margin-left:19px}
+.tkids.hidden{display:none}
+/* 项目之间留呼吸；滚动时项目名钉住，长列表里不会丢失上下文 */
+.tree > .tnode + .tnode{margin-top:16px;border-top:1px solid var(--line);padding-top:14px}
+.tree > .tnode > .trow{position:sticky;top:-6px;background:var(--panel);z-index:1}
+/* 文档行：三列网格。星级左对齐成列才能横向比较，右对齐只能一颗颗数。
+   日期用 tabular-nums，否则不同数字宽度会让这一列抖。 */
+/* 左侧留一个空的三角位（padding-left 30px），让文档行真正退后一格：
+   类型行是 [三角20][图标][名字]，文档行不缩进的话图标会跟类型图标几乎平齐。 */
+/* 星级/日期必须是固定列，才能竖着扫一眼比高低。
+   试过用 max-content 让它们紧跟标题，结果每行位置都不同，反而更难读 —— 别再改回去。
+   标题列给 max-width 收窄，避免元数据被甩到屏幕最右边造成长距离横跳。 */
+.tdoc{display:grid;grid-template-columns:20px minmax(0,1fr) 62px 84px;gap:12px;
+      align-items:center;max-width:1020px;
+      padding:6px 10px 6px 30px;border-radius:9px;cursor:pointer}
+.tdoc:hover{background:var(--panel2)}
+.tdoc .tt{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tdoc .tm{color:var(--dim);font-size:12px}
+.tdoc .td{color:var(--dim);font-size:12px;text-align:right;font-variant-numeric:tabular-nums}
+.imp{font-size:11px;letter-spacing:1px;color:var(--warn);justify-self:start}
+.imp i{color:#2c3550;font-style:normal}
 .toolbar{display:flex;gap:8px;align-items:center;margin-bottom:14px;flex-wrap:wrap}
 .toolbar input{flex:1;min-width:200px}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
@@ -102,7 +133,7 @@ code.key{background:#0d1320;border:1px solid var(--line);padding:3px 8px;border-
     <div class="navitem" data-v="branch" onclick="nav('branch')">🌿 分支</div>
     <div class="sec">接入</div>
     <div class="navitem" data-v="mcp" onclick="nav('mcp')">🔌 MCP 配置</div>
-    <div class="sec">库</div>
+    <div class="sec">项目</div>
     <div id="libs" class="col" style="gap:4px"></div>
   </aside>
 
@@ -130,8 +161,17 @@ code.key{background:#0d1320;border:1px solid var(--line);padding:3px 8px;border-
           <option value="glossary">术语</option>
           <option value="fact">事实</option>
         </select>
+        <button id="lmode" onclick="toggleListMode()">📁 文件夹</button>
         <button onclick="loadList()">刷新</button>
         <button class="primary" onclick="newDoc()">新建</button>
+      </div>
+      <div class="row" style="margin:-6px 0 12px;gap:8px;flex-wrap:wrap">
+        <span id="pfilter" class="hidden"></span>
+        <span id="treeops" class="row" style="gap:8px">
+          <button class="ghost" onclick="treeAll(true)">展开全部</button>
+          <button class="ghost" onclick="treeAll(false)">收起全部</button>
+        </span>
+        <span class="muted" id="tstat"></span>
       </div>
       <div id="lres"></div>
     </section>
@@ -318,7 +358,8 @@ curl -X POST -H "X-Api-Key: mk_***" -H "Content-Type: application/json" \
 </div>
 
 <script>
-const S = {token:localStorage.getItem('mem_token')||'', user:null, doc:null, boot:'', branch:''};
+const S = {token:localStorage.getItem('mem_token')||'', user:null, doc:null, boot:'', branch:'',
+           listMode:localStorage.getItem('mem_listmode')||'tree', treeOpen:{}, docs:[], lastLib:undefined};
 const $ = s=>document.querySelector(s);
 const H = s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
@@ -412,14 +453,41 @@ function nav(v){
   if(v==='branch') loadBranches();
 }
 
+/* 侧栏列项目（不是库）。库实际上基本只有 main，列项目才有导航价值。
+   项目名走 data 属性 + 事件委托，不拼进 onclick —— H() 不转义单引号。 */
 async function loadLibs(){
   try{
     const d = await api('/api/v1/documents?limit=200');
+    const cnt = {};
+    for(const i of d.items){ const p = i.project || '（未归项目）'; cnt[p] = (cnt[p]||0)+1; }
+    const projs = Object.keys(cnt).sort((a,b)=>{
+      if(a==='（未归项目）') return 1;
+      if(b==='（未归项目）') return -1;
+      return cnt[b]-cnt[a] || a.localeCompare(b);
+    });
+    $('#libs').innerHTML = projs.length
+      ? projs.map(p=>`<div class="navitem" data-proj="${encodeURIComponent(p)}">`
+          + `📁 ${H(p)} <span class="tcount">${cnt[p]} 篇</span></div>`).join('')
+      : '<div class="muted" style="font-size:12px">还没有记忆</div>';
     const libs = [...new Set(d.items.map(i=>i.library))];
-    $('#libs').innerHTML = libs.length? libs.map(l=>`<div class="navitem" onclick="filterLib('${H(l)}')">📁 ${H(l)}</div>`).join('') : '<div class="muted" style="font-size:12px">还没有记忆</div>';
     $('#slib').innerHTML = '<option value="">全部库</option>'+libs.map(l=>`<option>${H(l)}</option>`).join('');
   }catch(e){}
 }
+
+$('#libs').addEventListener('click', e=>{
+  const it = e.target.closest('[data-proj]');
+  if(!it) return;
+  filterProj(decodeURIComponent(it.dataset.proj));
+});
+
+// 点侧栏项目 → 列表页只显示该项目。「（未归项目）」是前端造的分组名，
+// 后端不认，所以那种情况下拉全部再让树自己分组。
+function filterProj(p){
+  nav('list'); $('#lq').value=''; $('#ltype').value='';
+  loadList(undefined, p === '（未归项目）' ? '' : p);
+}
+
+function clearProj(){ loadList(undefined, ''); }
 function filterLib(l){ nav('list'); $('#lq').value=''; loadList(l); }
 
 /* 检索 */
@@ -444,22 +512,152 @@ async function doSearch(){
 }
 
 /* 列表 */
-async function loadList(lib){
+/* 列表有两种模式：文件夹树（项目 → 类型 → 文档）和平铺卡片。
+   记在 localStorage 里，刷新后保持上次的选择。 */
+const TYPE_LABEL = {project_summary:'项目总结', decision:'决策', preference:'偏好',
+                    howto:'操作步骤', glossary:'术语', fact:'事实'};
+const TYPE_ICON = {project_summary:'📋', decision:'⚖️', preference:'❤️',
+                   howto:'🔧', glossary:'📖', fact:'💡'};
+// 类型的展示顺序：按"回看时的重要程度"排，不用字母序
+const TYPE_ORDER = ['project_summary','decision','preference','howto','glossary','fact'];
+
+function toggleListMode(){
+  S.listMode = S.listMode === 'tree' ? 'flat' : 'tree';
+  localStorage.setItem('mem_listmode', S.listMode);
+  loadList(S.lastLib);
+}
+
+async function loadList(lib, proj){
+  S.lastLib = lib;
+  if(proj !== undefined) S.projFilter = proj;
   const q=$('#lq').value.trim(), t=$('#ltype').value;
   let url='/api/v1/documents?limit=200';
   if(q) url+='&q='+encodeURIComponent(q);
   if(t) url+='&type='+t;
   if(lib) url+='&library='+encodeURIComponent(lib);
+  if(S.projFilter) url+='&project='+encodeURIComponent(S.projFilter);
+  const tree = S.listMode !== 'flat';
+  // 按钮显示"点了会切到什么"，加个箭头避免被误读成"当前是什么"
+  $('#lmode').textContent = tree ? '切到 📄 平铺' : '切到 📁 文件夹';
+  $('#treeops').classList.toggle('hidden', !tree);
+  // 有项目过滤时给个可点掉的标记，否则用户会困在某个项目里找不到出口
+  const pf = $('#pfilter');
+  if(S.projFilter){
+    pf.classList.remove('hidden');
+    pf.innerHTML = `<button class="ghost" onclick="clearProj()">项目 ${H(S.projFilter)} ✕</button>`;
+  }else{ pf.classList.add('hidden'); pf.innerHTML=''; }
   try{
     const d = await api(url);
-    $('#lres').innerHTML = d.items.length? d.items.map(i=>`<div class="card doc" onclick="openDoc(${i.id})">
-      <h3>${H(i.title)} <span class="badge">${H(i.type)}</span></h3>
-      <div class="muted" style="font-size:12px">
-        ${i.project?'项目 '+H(i.project)+' · ':''}库 ${H(i.library)} · 重要度 ${i.importance} · 更新 ${H((i.updatedAt||'').slice(0,16).replace('T',' '))}
-        ${(i.tags||[]).map(x=>' <span class="tag">'+H(x)+'</span>').join('')}
-      </div></div>`).join('') : '<div class="card muted">这个筛选下没有文档。</div>';
+    S.docs = d.items;
+    if(!d.items.length){
+      $('#lres').innerHTML = '<div class="card muted">这个筛选下没有文档。</div>';
+      $('#tstat').textContent = '';
+      return;
+    }
+    tree ? renderTree(d.items) : renderFlat(d.items);
   }catch(e){ toast(e.message,1); }
 }
+
+function renderFlat(items){
+  $('#lres').innerHTML = items.map(i=>`<div class="card doc" data-id="${i.id}">
+    <h3>${H(i.title)} <span class="badge">${H(i.type)}</span></h3>
+    <div class="muted" style="font-size:12px">
+      ${i.project?'项目 '+H(i.project)+' · ':''}库 ${H(i.library)} · 重要度 ${i.importance} · 更新 ${H((i.updatedAt||'').slice(0,16).replace('T',' '))}
+      ${(i.tags||[]).map(x=>' <span class="tag">'+H(x)+'</span>').join('')}
+    </div></div>`).join('');
+  $('#tstat').textContent = '';
+}
+
+function renderTree(items){
+  // 分组：项目 → 类型 → 文档。没填 project 的归到"未分类项目"
+  const byProj = {};
+  for(const i of items){
+    const p = i.project || '（未归项目）';
+    (byProj[p] = byProj[p] || {})[i.type] = (byProj[p][i.type] || []).concat(i);
+  }
+  // 项目排序：文档多的在前，同数量按名字；未归类固定垫底
+  const projs = Object.keys(byProj).sort((a,b)=>{
+    if(a==='（未归项目）') return 1;
+    if(b==='（未归项目）') return -1;
+    const ca = Object.values(byProj[a]).flat().length;
+    const cb = Object.values(byProj[b]).flat().length;
+    return cb - ca || a.localeCompare(b);
+  });
+
+  // 折叠状态用「项目名/类型」当 key 存在 S.treeOpen 里（重渲染后仍保持），
+  // 但 DOM 上不放这个 key —— 项目名可能含引号/特殊字符，拼进属性选择器会炸。
+  // DOM 里改用递增编号，配对靠 data-kid 数字。
+  const open = S.treeOpen || (S.treeOpen = {});
+  let seq = 0;
+  const html = projs.map(p=>{
+    const types = Object.keys(byProj[p]).sort(
+      (a,b)=>TYPE_ORDER.indexOf(a)-TYPE_ORDER.indexOf(b));
+    const n = Object.values(byProj[p]).flat().length;
+    const pk = 'p\u0000'+p;
+    if(open[pk] === undefined) open[pk] = true;   // 默认展开
+    const pid = ++seq;
+    const kids = types.map(t=>{
+      const docs = byProj[p][t].slice().sort(
+        (a,b)=>(b.updatedAt||'').localeCompare(a.updatedAt||''));
+      const tk = pk+'\u0000t\u0000'+t;
+      if(open[tk] === undefined) open[tk] = true;
+      const tid = ++seq;
+      // 星级画满 5 格（空星置灰），左对齐成列才能一眼比高低
+      const rows = docs.map(i=>`<div class="tdoc" data-id="${i.id}" title="${H(i.title)}">
+          <span class="tm">📄</span>
+          <span class="tt">${H(i.title)}</span>
+          <span class="imp" aria-label="重要度 ${i.importance}/5">${'★'.repeat(i.importance)}<i>${'★'.repeat(5-i.importance)}</i></span>
+          <span class="td">${H((i.updatedAt||'').slice(0,10))}</span>
+        </div>`).join('');
+      return `<div class="tnode">
+        <div class="trow" data-n="${tid}" data-key="${encodeURIComponent(tk)}">
+          <span class="tcar${open[tk]?' open':''}">▶</span>
+          <span>${TYPE_ICON[t]||'📄'}</span>
+          <span class="tname">${H(TYPE_LABEL[t]||t)}</span>
+          <span class="tcount">${docs.length} 篇</span>
+        </div>
+        <div class="tkids${open[tk]?'':' hidden'}" data-kid="${tid}">${rows}</div>
+      </div>`;
+    }).join('');
+    return `<div class="tnode">
+      <div class="trow" data-n="${pid}" data-key="${encodeURIComponent(pk)}">
+        <span class="tcar${open[pk]?' open':''}">▶</span>
+        <span>📁</span>
+        <span class="tname">${H(p)}</span>
+        <span class="tcount">${n} 篇 · ${types.length} 类</span>
+      </div>
+      <div class="tkids${open[pk]?'':' hidden'}" data-kid="${pid}">${kids}</div>
+    </div>`;
+  }).join('');
+
+  $('#lres').innerHTML = '<div class="tree">'+html+'</div>';
+  $('#tstat').textContent = `${projs.length} 个项目 · ${items.length} 篇记忆`;
+}
+
+function treeAll(openIt){
+  S.treeOpen = S.treeOpen || {};
+  document.querySelectorAll('#lres .trow').forEach(r=>{
+    S.treeOpen[decodeURIComponent(r.dataset.key)] = openIt;
+    r.querySelector('.tcar').classList.toggle('open', openIt);
+  });
+  document.querySelectorAll('#lres .tkids').forEach(k=>k.classList.toggle('hidden', !openIt));
+}
+
+// 事件委托：树是动态重建的，绑在容器上才不会因重渲染丢监听
+$('#lres').addEventListener('click', e=>{
+  const doc = e.target.closest('[data-id]');
+  if(doc){ openDoc(+doc.dataset.id); return; }
+  const row = e.target.closest('.trow');
+  if(!row) return;
+  const key = decodeURIComponent(row.dataset.key);
+  S.treeOpen = S.treeOpen || {};
+  const nowOpen = !S.treeOpen[key];
+  S.treeOpen[key] = nowOpen;
+  row.querySelector('.tcar').classList.toggle('open', nowOpen);
+  // 用编号配对，不用项目名（名字里的引号会撑破属性选择器）
+  const kid = row.parentElement.querySelector(`.tkids[data-kid="${row.dataset.n}"]`);
+  if(kid) kid.classList.toggle('hidden', !nowOpen);
+});
 
 /* 编辑 */
 function newDoc(){
