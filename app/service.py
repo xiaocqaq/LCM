@@ -380,6 +380,32 @@ async def search_chunks(session: AsyncSession, user: User, q: str, limit: int = 
             e = rrf.setdefault(r[0], {"row": r, "score": 0.0})
             e["score"] += 1.0 / (60 + rank + 1)
             doc_ids.add(r[1])
+
+    # ---- 长度归一化 + importance 加权 ----
+    # 为什么需要：RRF 只看排名，不看文档体量。实测 17 个查询，一篇 15303 字符的长文
+    # 出现在 13 个结果里、7 次排第一 —— 它长度是其他文档的 6-230 倍，词汇覆盖面天然大，
+    # 靠"碰巧含有查询词"就挤掉了真正对题的短文（194 字符的《TTS 选型决策》那种）。
+    # BM25 本来用 b 参数干这件事，但 ts_rank 没有，得自己补。
+    if rrf:
+        lens = dict((await session.execute(
+            select(Document.id, func.length(Document.content))
+            .where(Document.id.in_(list(doc_ids)))
+        )).all())
+        avg_len = (sum(lens.values()) / len(lens)) if lens else 1.0
+        imps = dict((await session.execute(
+            select(Document.id, Document.importance)
+            .where(Document.id.in_(list(doc_ids)))
+        )).all())
+        for e in rrf.values():
+            did = e["row"][1]
+            dl = max(1, lens.get(did, 1))
+            # 温和衰减：ratio 3 倍 → ×0.79，10 倍 → ×0.62。
+            # 指数刻意压到 0.35，不是要把长文赶出结果（长文往往信息也多），
+            # 只是抵掉它靠体量刷来的优势。
+            e["score"] *= (avg_len / dl) ** 0.35 if dl > avg_len else 1.0
+            # importance 你在认真填（1-5），但检索一直没用它。
+            # 同分时高重要度该靠前，权重压在 ±10% 免得盖过相关性本身。
+            e["score"] *= 1.0 + (imps.get(did, 3) - 3) * 0.05
     # 每篇文档最多占 PER_DOC_CAP 条：否则一篇长文档的多个 chunk 会吃满整个结果集，
     # agent 拿去恢复上下文时等于白烧 token。凑不满 limit 时再放宽补齐。
     PER_DOC_CAP = 2

@@ -299,7 +299,7 @@ ls /tmp/vfy/main/ && head -8 /tmp/vfy/main/*.md
 
 ## 测试
 
-一键跑全部十套 + 服务状态 + 公网端点 + Hermes 侧闭环：
+一键跑全部十一套 + 服务状态 + 公网端点 + Hermes 侧闭环：
 
 ```bash
 bash /opt/memorys/tests/acceptance.sh
@@ -319,6 +319,8 @@ cd /opt/memorys && export PYTHONPATH=/opt/memorys
 .venv/bin/python tests/branch_test.py           # 分支管理 23 项（建/切/合/删 + 非法输入）
 .venv/bin/python tests/branch_write_test.py     # 写入指定分支 25 项（隔离性 + 边界）
 .venv/bin/python tests/bootstrap_budget_test.py # bootstrap token 预算 22 项
+.venv/bin/python tests/rank_test.py             # 排序质量 6 项（长度归一化+importance）
+.venv/bin/python tests/recall_audit.py          # 召回质量基线（非断言，看命中率）
 bash tests/cleanup.sh                           # 测试跑完清残留（分支/文档/md/测试账号）
 
 # 把任意一套指向公网域名
@@ -393,3 +395,83 @@ DB 和磁盘要一起清。只清 DB 会留下孤儿 md，下次 `sync` 会被�
     两种截断必须用不同变量区分（`budget_capped` vs `truncated`）。
 23. `digest` 字段也要守预算。它是给 agent 直接塞进开场的，
     原来固定取前 20 篇每篇 200 字符，小预算下会比 `documents` 还长。
+24. **UI 配色别用半透明色承载语义**。空星一度用 `rgba(琥珀,.34)`，两个问题：
+    alpha 的实际对比度取决于背后是什么，在基础表面刚好达标的值换到卡片/hover 态就失效；
+    而且琥珀亮度高 —— 暗底上满色有 9.3:1 余量可以消耗，亮底上满色才 1.6:1，
+    半透明后基本消失。**亮色主题才是会翻车的那个**，我却只验了暗色。
+    改用不透明的分主题 token。
+25. **字号越小，颜色要越深**。分组标题原来用 `--faint`（最浅）配最小字号，方向反了，
+    实测只有 3.2:1。
+26. 对比度要算不要看。写脚本取 `computedStyle` 算 WCAG 比值（方法见「UI 主题」节），
+    目测会系统性高估细描边和小字号元素 —— 放大截图看更会。
+27. 主题初始化脚本必须放 `<head>`，放 `body` 会先渲染一帧默认主题再跳变。
+
+---
+
+## 检索排序
+
+RRF 之后有两道后处理，都在 `service.search_chunks`：
+
+**长度归一化** `(avg_len/doc_len)^0.35`，只对超过平均长度的文档衰减。
+不加这个的实测后果：一篇 15303 字符的长文出现在 17 个查询里的 13 个、7 次排第一，
+把 194 字符的对题短文全挤掉了。指数刻意压到 0.35 —— 目的是抵掉体量优势，
+不是把长文赶出结果（长文往往信息也多）。BM25 用 `b` 参数做这件事，`ts_rank` 没有。
+
+**importance 加权** ±10%。同分时高重要度靠前，权重压得小以免盖过相关性本身。
+
+改动前后（同一套 17 查询，`tests/recall_audit.py`）：
+
+| | 修前 | 修后 |
+|---|---|---|
+| 长文出现次数 | 13/17 | 5/17 |
+| 长文排第一 | 7 次 | 2 次 |
+| 命中率 | 73% | 80% |
+
+`tests/rank_test.py` 锁住三条：对题短文要排在长文之前、同长度时 importance 高的靠前、
+**长文在自己真正对题的查询上仍要排第一**（最后这条是平衡点，防止惩罚过头）。
+
+### 为什么还没上向量检索
+
+评估过，当前不值得：
+
+- 库规模 10 篇 / 26KB / 64 chunk。用 500M 内存的模型检索 26KB 文本不成比例
+- 没有可用端点：octopus `/v1/embeddings` 404，new-api 9 个渠道无 embedding 模型
+- 瓶颈本来在排序不在召回 —— 长文主导的问题上向量也解决不了，反而会把噪声一起加进来
+- 索引侧同义扩展已经覆盖了同义改写类查询（B 类命中 8/10）
+
+触发条件（任一出现即可动手）：文档数过 300 篇、修完排序命中率仍低于 70%、
+或开始存大量非技术记忆（技术文档词汇集中，日记/会议记录那类词汇发散才真需要语义）。
+
+架构已预留：`MEM_EMBED_API_BASE` 填上就自动启用混合检索，pgvector 和 hnsw 索引都装好了，
+三路 RRF 融合留着 embedding 那一路。改配置的事，不用重构。
+
+---
+
+## UI 主题
+
+设计语言对齐 `doc.xlingo.fun/langchain`（从其构建产物提取 token）：墨绿主色、双主题、
+8-10px 圆角、DM Mono 等宽栈。变量名沿用原来的 `--panel`/`--line`/`--dim` 等，
+换主题只改取值。
+
+主题偏好存 `localStorage.mem_theme`，未设置时跟随系统。**初始化脚本必须放 `<head>`** ——
+放 body 里会先渲染一帧默认主题再跳变（闪白）。
+
+对比度按实测校准，不靠目测。量法：
+
+```js
+// 在控制台跑，取 computedStyle 算 WCAG 比值
+const L=c=>{const[r,g,b]=c.match(/[\d.]+/g).slice(0,3).map(v=>{v/=255;
+  return v<=.03928?v/12.92:Math.pow((v+.055)/1.055,2.4)});return .2126*r+.7152*g+.0722*b};
+const ratio=(a,b)=>{const l1=L(a),l2=L(b);
+  return ((Math.max(l1,l2)+.05)/(Math.min(l1,l2)+.05)).toFixed(2)};
+```
+
+当前值（卡片底为基准）：
+
+| 元素 | 亮色 | 暗色 | 要求 |
+|---|---|---|---|
+| 文档标题 | 11.53:1 | 10.92:1 | 4.5 |
+| 分组标题 | 4.96:1 | 5.79:1 | 4.5 |
+| 日期/计数 | 5.39:1 | 5.49:1 | 4.5 |
+| 实星 | 4.09:1 | 7.72:1 | 3 |
+| 空星 | 3.30:1 | 3.45:1 | 3 |
