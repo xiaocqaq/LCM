@@ -6,7 +6,7 @@ KEY=$(cat /root/.memorys-hermes-key)
 BASE=https://repo.xlingo.fun
 DATA=/var/lib/memorys/data/users
 REAL_UID=u20        # 真实用户，其余目录都是测试产物
-PATTERNS='公网-MCP|分支测试|只存在于分支|dd-a-|dd-b-|ui-demo|ui-w-|分支写入验证|UI分支写入|另存基线'
+PATTERNS='预算测试|预算-决策|预算-总结|公网-MCP|分支测试|只存在于分支|dd-a-|dd-b-|ui-demo|ui-w-|分支写入验证|UI分支写入|另存基线'
 
 echo "=== 1. 切回主分支 ==="
 curl -s -X POST -H "X-Api-Key: $KEY" -H 'Content-Type: application/json' \
@@ -33,8 +33,8 @@ DELETE FROM api_keys WHERE user_id IN (
   SELECT id FROM users WHERE xiaoai_user_id BETWEEN 999000 AND 999999);
 DELETE FROM users WHERE xiaoai_user_id BETWEEN 999000 AND 999999;
 DELETE FROM chunks WHERE document_id IN (
-  SELECT id FROM documents WHERE title ~ '公网 MCP|分支测试|只存在于分支|分支写入验证|UI分支写入|另存基线|上游 token');
-DELETE FROM documents WHERE title ~ '公网 MCP|分支测试|只存在于分支|分支写入验证|UI分支写入|另存基线|上游 token';
+  SELECT id FROM documents WHERE title ~ '预算测试|预算-决策|预算-总结|公网 MCP|分支测试|只存在于分支|分支写入验证|UI分支写入|另存基线|上游 token');
+DELETE FROM documents WHERE title ~ '预算测试|预算-决策|预算-总结|公网 MCP|分支测试|只存在于分支|分支写入验证|UI分支写入|另存基线|上游 token';
 COMMIT;
 SQL
 

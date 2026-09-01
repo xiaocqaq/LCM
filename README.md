@@ -299,7 +299,7 @@ ls /tmp/vfy/main/ && head -8 /tmp/vfy/main/*.md
 
 ## 测试
 
-一键跑全部九套 + 服务状态 + 公网端点 + Hermes 侧闭环：
+一键跑全部十套 + 服务状态 + 公网端点 + Hermes 侧闭环：
 
 ```bash
 bash /opt/memorys/tests/acceptance.sh
@@ -318,6 +318,7 @@ cd /opt/memorys && export PYTHONPATH=/opt/memorys
 .venv/bin/python tests/git_push_test.py         # GitHub 备份链路 13 项（本地 bare 仓库，不碰真远端）
 .venv/bin/python tests/branch_test.py           # 分支管理 23 项（建/切/合/删 + 非法输入）
 .venv/bin/python tests/branch_write_test.py     # 写入指定分支 25 项（隔离性 + 边界）
+.venv/bin/python tests/bootstrap_budget_test.py # bootstrap token 预算 22 项
 bash tests/cleanup.sh                           # 测试跑完清残留（分支/文档/md/测试账号）
 
 # 把任意一套指向公网域名
@@ -379,3 +380,16 @@ DB 和磁盘要一起清。只清 DB 会留下孤儿 md，下次 `sync` 会被�
 20. **UI 里"先写提示再刷新下拉"会白写**。`loadEditBranches()` 内部会调
     `updateBranchHint()` 覆写 `#brhint`，所以要先 `await` 刷新、再写结果文案。
     （踩过一次：保存成功但提示区是空的）
+21. **预算装箱循环里超额要 `break` 不是 `continue`**。`bootstrap_context` 原本写的是
+    `if used + cost > token_budget and picked: continue`，两个后果：
+    ①`continue` 让它跳过大文档去凑小文档，选出来的是"能塞进缝隙的"而不是
+    "按 TYPE_PRIORITY/importance 排在前面的"；
+    ②`and picked` 短路使首篇永远无条件全量收录 —— 预算填 100 也返回 3430 tokens，
+    表现就是"预算数字怎么改都没反应"。
+    正解：放不下就按剩余预算截断内容，然后 `break`。
+22. **别把"因单篇长度上限截断"当成"预算耗尽"**。修 21 时我一度用
+    `if truncated: break`，结果 8000/20000 的大预算也只返回 1 篇 ——
+    首篇是因为 `PER_DOC_CHARS=4000` 才截断的，那时预算还剩一大半。
+    两种截断必须用不同变量区分（`budget_capped` vs `truncated`）。
+23. `digest` 字段也要守预算。它是给 agent 直接塞进开场的，
+    原来固定取前 20 篇每篇 200 字符，小预算下会比 `documents` 还长。

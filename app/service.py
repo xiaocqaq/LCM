@@ -466,22 +466,61 @@ async def bootstrap_context(session: AsyncSession, user: User, project: str | No
     # 排序：类型优先级 → importance → updated_at
     docs.sort(key=lambda d: (TYPE_PRIORITY.get(d.md_type, 9), -d.importance, -(d.updated_at.timestamp() if d.updated_at else 0)))
 
+    # 预算下限：低于这个数拼不出有意义的上下文，还不如报错让调用方改
+    token_budget = max(200, int(token_budget))
+    META_COST = 30          # 标题/类型/标签那几行的开销
+    MIN_SLICE = 120         # 截断后至少留这么多 token，否则这篇没有信息量，不如不收
+
     def est_tokens(s: str) -> int:
         # 中文 ~1 token/字，英文 ~0.75 token/词：粗略 1.7 字/token 或 len*0.7
         return max(1, int(len(s) * 0.85))
 
+    def chars_for(tok: int) -> int:
+        # est_tokens 的反函数，用来按剩余预算切内容
+        return max(1, int(tok / 0.85))
+
+    PER_DOC_CHARS = 4000    # 单篇上限，防一篇超长文吃掉整个预算
+
     used = 0
     picked: list[dict] = []
     for d in docs:
-        entry = {"id": d.id, "title": d.title, "type": d.md_type, "project": d.project,
-                 "tags": d.tags, "importance": d.importance,
-                 "content": d.content[:4000], "truncated": len(d.content) > 4000}
-        cost = est_tokens(entry["content"]) + 30
-        if used + cost > token_budget and picked:
-            continue
-        picked.append(entry)
-        used += cost
-    digest_parts = [f"[{e['type']}] {e['title']}: {e['content'][:200]}" for e in picked[:20]]
+        left = token_budget - used
+        if left <= META_COST + MIN_SLICE:
+            break               # 剩余空间连一段有意义的摘录都放不下，收工
+        body = d.content or ""
+        head = body[:PER_DOC_CHARS]
+        if est_tokens(head) + META_COST <= left:
+            # 放得下（可能仍因 PER_DOC_CHARS 上限而截断，那跟预算无关，继续收下一篇）
+            content = head
+            budget_capped = False
+        else:
+            # 放不下就按剩余预算切。
+            # 原来这里是 `continue`（跳过这篇去看下一篇），导致两个问题：
+            #   1) 排序失效 —— 收进来的是"能塞进缝隙的小文档"而不是"最重要的前 N 篇"
+            #   2) 配合 `and picked` 的短路，首篇永远无条件全量收录，
+            #      预算填 100 也能返回 3430 tokens
+            content = body[:chars_for(left - META_COST)]
+            budget_capped = True
+        picked.append({
+            "id": d.id, "title": d.title, "type": d.md_type, "project": d.project,
+            "tags": d.tags, "importance": d.importance,
+            "content": content, "truncated": len(content) < len(body),
+        })
+        used += est_tokens(content) + META_COST
+        # 只有"被预算卡住"才停。因 PER_DOC_CHARS 截断不算 —— 那时预算还有富余，
+        # 后面的文档照样能收（这里判断错会让大预算也只返回 1 篇）。
+        if budget_capped:
+            break
+    # digest 是给 agent 直接塞进开场的，也得守预算 —— 它不能比 documents 还长
+    digest_parts: list[str] = []
+    dused = 0
+    for e in picked:
+        part = f"[{e['type']}] {e['title']}: {e['content'][:200]}"
+        c = est_tokens(part)
+        if dused + c > token_budget and digest_parts:
+            break
+        digest_parts.append(part)
+        dused += c
     return {
         # project 留空时是「main 库全部」，不能把库名回填成项目名，否则
         # 调用方会以为存在一个叫 main 的项目。scope 明确区分两种范围。
