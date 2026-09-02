@@ -6,14 +6,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlalchemy import delete, desc, func, select, text
+from sqlalchemy import update as sqlalchemy_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from . import gitsvc
+from . import links as links_mod
 from .config import settings
 from .mdstore import (
+    LINK_TYPES,
     VALID_TYPES,
     compute_hash,
     doc_path,
+    normalize_links,
     parse_document,
     render_document,
     sanitize_slug,
@@ -73,6 +77,7 @@ async def create_document(session: AsyncSession, user: User, payload: dict) -> D
     tags = [str(t)[:32] for t in (payload.get("tags") or [])][:16]
     importance = max(1, min(5, int(payload.get("importance") or 3)))
     source = (payload.get("source") or "web")[:64]
+    links = normalize_links(payload.get("links"))
     content = (payload.get("content") or "").strip()
     if not content:
         raise ValueError("content 不能为空")
@@ -121,12 +126,16 @@ async def create_document(session: AsyncSession, user: User, payload: dict) -> D
         tags=tags,
         importance=importance,
         source=source,
+        links=links,
         content=content,
         rel_path=f"{library}/{slug}.md",
         content_hash=compute_hash(content),
     )
     session.add(doc)
     await session.flush()
+
+    # links 落效果：supersedes 会给目标打 superseded_by（把旧版本从检索里请出去）
+    link_report = await links_mod.apply_links(session, user, doc)
 
     meta = {
         "id": f"mem_{uuid.uuid4().hex[:12]}",
@@ -139,12 +148,17 @@ async def create_document(session: AsyncSession, user: User, payload: dict) -> D
         "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "updated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
+    if links:
+        meta["links"] = links
     p = doc_path(settings.data_dir, user.id, library, slug)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(render_document(meta, content), encoding="utf-8")
     await _reindex_document(session, doc)
     await session.commit()
     gitsvc.try_commit_all(user_root(settings.data_dir, user.id), f"create: {title}")
+    # 未解析的 link 挂在实例上供上层回报。不抛异常 —— 关系写错了文档本身还是有效的，
+    # 但也不能静默丢弃，否则用户以为 supersedes 生效了、旧文档其实还在检索里。
+    doc.link_report = link_report  # type: ignore[attr-defined]
     return doc
 
 
@@ -183,6 +197,14 @@ async def update_document(session: AsyncSession, user: User, doc: Document, payl
                 setattr(doc, col, payload[k])
     if "content" in payload and payload["content"] is not None:
         doc.content = str(payload["content"]).strip()
+    link_report = None
+    if "links" in payload:
+        # 换 links 前先撤掉旧的 supersede 标记，否则被"取代"的文档永久隐身：
+        # 用户把 links 改成别的目标，旧目标的 superseded_by 还指着这篇，
+        # 而 links 里已经没有那条关系了，从任何界面都看不出原因。
+        await links_mod.clear_supersede_marks(session, doc)
+        doc.links = normalize_links(payload.get("links"))
+        link_report = await links_mod.apply_links(session, user, doc)
     doc.content_hash = compute_hash(doc.content)
     doc.updated_at = _now()
     await session.flush()
@@ -199,12 +221,16 @@ async def update_document(session: AsyncSession, user: User, doc: Document, payl
         "created_at": doc.created_at.strftime("%Y-%m-%dT%H:%M:%SZ") if doc.created_at else "",
         "updated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
+    if doc.links:
+        meta["links"] = doc.links
     p = root / doc.rel_path
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(render_document(meta, doc.content), encoding="utf-8")
     await _reindex_document(session, doc)
     await session.commit()
     gitsvc.try_commit_all(root, f"update: {doc.title}")
+    if link_report is not None:
+        doc.link_report = link_report  # type: ignore[attr-defined]
     return doc
 
 
@@ -283,6 +309,9 @@ async def soft_delete_document(session: AsyncSession, user: User, doc: Document)
     """
     doc.deleted_at = _now()
     await session.execute(delete(Chunk).where(Chunk.document_id == doc.id))
+    # 删掉一篇"取代者"之后，被它取代的文档必须重新可见 ——
+    # 否则旧版本永久隐身，而且没有任何地方能看出为什么。
+    await links_mod.clear_supersede_marks(session, doc)
     await session.flush()
     root = user_root(settings.data_dir, user.id)
     p = root / doc.rel_path
@@ -324,30 +353,51 @@ def _doc_meta(doc: Document) -> dict:
 
 
 async def _reindex_document(session: AsyncSession, doc: Document, do_embed: bool = True) -> None:
-    """删旧 chunk，重切、重分词、可选 embedding，重插。
+    """删旧 chunk，重切、重分词，重插。向量按内容复用，只对新内容调上游。
 
-    ⚠️ `do_embed=False` 会让这篇文档**丢掉已有向量** —— 本函数是先 DELETE 整行
-    再重插，向量列跟着一起没。它只适合"文档内容真的变了、向量本来也该重算"
-    的场景（比如从磁盘 sync 出内容变化）。
-    如果只是想让改过的 _SYNONYMS 生效，用 tests/reindex_lex_only.py：
-    那个只 UPDATE tsv 列，不动 chunk 行。
-    （踩过：拿 do_embed=False 刷同义词，60 个向量被清空还没发现）
+    向量复用是必须的，不是优化：一次全量 reindex 要给每个 chunk 调一次
+    embedding 上游，而这个上游会随机 ReadTimeout（重试要等 30s+）。
+    实测 23 篇文档全量 reindex 超过 7 分钟，直接把 `POST /api/v1/sync` 打成超时。
+    而绝大多数 chunk 的文本根本没变 —— 切分规则一样、正文一样，就该沿用旧向量。
+
+    复用的键是 chunk 正文本身（不是 seq）：加一节内容会让后面所有 chunk 的 seq
+    整体位移，按 seq 复用等于把向量和内容错配，检索会返回莫名其妙的结果。
+
+    do_embed=False 时只跳过"给新内容算向量"，已有向量仍然保留 ——
+    早先的实现是先 DELETE 再重插、向量一起没，拿它刷同义词清空过全库向量。
     """
+    # 先取旧 chunk 的 (内容 → 向量)。用原始 SQL 读 embedding 列的文本形式，
+    # ORM 那边这一列是 Text（启动时 ALTER 成 vector），走 ORM 会拿到 str 或 None。
+    old_vecs: dict[str, str] = {}
+    rows = (await session.execute(
+        text("SELECT content, embedding::text FROM chunks "
+             "WHERE document_id = :d AND embedding IS NOT NULL"),
+        {"d": doc.id},
+    )).all()
+    for content_, vec_ in rows:
+        if content_ and vec_:
+            old_vecs[content_] = vec_
+
     await session.execute(delete(Chunk).where(Chunk.document_id == doc.id))
     pieces = split_chunks(doc.content)
     if not pieces:
         # 空内容也保留一个 chunk，防止文档整体消失
         pieces = [{"heading": "", "content": doc.content}]
-    embeds = None
-    if do_embed:
-        embeds = await embed_texts([f"{doc.title}\n{p['heading']}\n{p['content']}" for p in pieces])
-        # embed_texts 允许部分成功（上游随机超时），失败位是 None。
-        # 维度不符的单独剔掉而不是整批丢：hnsw 索引建在固定维度上，
-        # 混入别的维度写入会被 pgvector 拒，但没理由因为一条坏的放弃其余好的。
-        if embeds:
-            embeds = [v if (v and len(v) == settings.embed_dim) else None for v in embeds]
-            if not any(embeds):
-                embeds = None
+
+    # 只给"旧向量里没有的内容"调上游
+    need_idx = [i for i, p in enumerate(pieces) if p["content"] not in old_vecs]
+    fresh: dict[int, list[float]] = {}
+    if do_embed and need_idx:
+        got = await embed_texts(
+            [f"{doc.title}\n{pieces[i]['heading']}\n{pieces[i]['content']}" for i in need_idx])
+        if got:
+            for slot, i in enumerate(need_idx):
+                v = got[slot] if slot < len(got) else None
+                # 维度不符的单独剔掉而不是整批丢：hnsw 索引建在固定维度上，
+                # 混入别的维度写入会被 pgvector 拒，但没理由因为一条坏的放弃其余好的。
+                if v and len(v) == settings.embed_dim:
+                    fresh[i] = v
+
     for seq, p in enumerate(pieces):
         lex = _tsvector_literal(f"{doc.title} {doc.project} {' '.join(doc.tags or [])} {p['heading']} {p['content']}")
         ch = Chunk(document_id=doc.id, seq=seq, heading=p["heading"], content=p["content"])
@@ -357,22 +407,63 @@ async def _reindex_document(session: AsyncSession, doc: Document, do_embed: bool
             text("UPDATE chunks SET tsv = to_tsvector('simple', :lex) WHERE id = :id"),
             {"lex": lex, "id": ch.id},
         )
-        vec = embeds[seq] if embeds else None
-        if vec:
+        reuse = old_vecs.get(p["content"])
+        if reuse:
             await session.execute(
                 text(f"UPDATE chunks SET embedding = CAST(:vec AS vector({settings.embed_dim})) WHERE id = :id"),
-                {"vec": "[" + ",".join(f"{x:.6f}" for x in vec) + "]", "id": ch.id},
+                {"vec": reuse, "id": ch.id},
             )
+        elif seq in fresh:
+            await session.execute(
+                text(f"UPDATE chunks SET embedding = CAST(:vec AS vector({settings.embed_dim})) WHERE id = :id"),
+                {"vec": "[" + ",".join(f"{x:.6f}" for x in fresh[seq]) + "]", "id": ch.id},
+            )
+
+
+async def _bump_access(doc_ids: list[int]) -> None:
+    """给检索命中的文档累加 access_count。
+
+    为什么用独立 session 而不是调用方的：检索是读路径，
+    FastAPI 的 get_session 从不 commit（没有 autocommit），
+    挂在调用方 session 上的 UPDATE 会随请求结束被丢掉 —— 实测就是这么失败的。
+    也不该为了记账让检索变成写事务：调用方可能在一个更大的只读逻辑里。
+
+    记账失败绝不能影响检索本身，所以整段包在 try 里。
+    热度是锦上添花的信号，丢几次无所谓；搜不出结果是硬故障。
+    """
+    if not doc_ids:
+        return
+    from .db import SessionLocal
+    try:
+        async with SessionLocal() as s:
+            await s.execute(
+                sqlalchemy_update(Document)
+                .where(Document.id.in_(doc_ids))
+                .values(access_count=Document.access_count + 1, last_accessed_at=_now())
+                .execution_options(synchronize_session=False)
+            )
+            await s.commit()
+    except Exception:
+        pass
 
 
 async def search_chunks(session: AsyncSession, user: User, q: str, limit: int = 10,
                         library: str | None = None, project: str | None = None,
-                        use_vector: bool = True) -> list[dict]:
-    """关键词检索（tsvector OR + ts_rank）+ trgm 相似度兜底，RRF 融合。"""
+                        use_vector: bool = True,
+                        include_superseded: bool = False) -> list[dict]:
+    """关键词检索（tsvector OR + ts_rank）+ trgm 相似度兜底 + 可选向量，RRF 融合。
+
+    默认排除被 supersedes 的文档。理由是实测踩到的问题：库里有三篇讲同一个
+    项目工程结构的文档（标题相似度 0.47-0.60，小节几乎一一对应），
+    检索时三篇全命中，agent 无从判断该信哪个 —— 那比没有信息更糟。
+    标了 supersedes 之后旧版本退出检索，但文件还在、还能直接 memory_get 读。
+    """
     tsq = to_tsquery(q)
     kw_rows: list[tuple] = []
     trgm_rows: list[tuple] = []
     conds = [Document.user_id == user.id, Document.deleted_at.is_(None)]
+    if not include_superseded:
+        conds.append(Document.superseded_by.is_(None))
     if library:
         conds.append(Document.library == sanitize_slug(library))
     if project:
@@ -475,6 +566,9 @@ async def search_chunks(session: AsyncSession, user: User, q: str, limit: int = 
             e["score"] *= (avg_len / dl) ** 0.35 if dl > avg_len else 1.0
             # importance 你在认真填（1-5），但检索一直没用它。
             # 同分时高重要度该靠前，权重压在 ±10% 免得盖过相关性本身。
+            # 注意这里用手填的 importance，不掺 access_count 的热度 ——
+            # 检索里加热度会形成正反馈：排前面 → 被读到 → 排更前面，
+            # 最后热门文档垄断所有查询。热度只用在 bootstrap 的取舍上。
             e["score"] *= 1.0 + (imps.get(did, 3) - 3) * 0.05
     # 每篇文档最多占 PER_DOC_CAP 条：否则一篇长文档的多个 chunk 会吃满整个结果集，
     # agent 拿去恢复上下文时等于白烧 token。凑不满 limit 时再放宽补齐。
@@ -495,6 +589,12 @@ async def search_chunks(session: AsyncSession, user: User, q: str, limit: int = 
     if not merged:
         return []
     docs = {d.id: d for d in (await session.execute(select(Document).where(Document.id.in_(list(doc_ids))))).scalars()}
+    # 记账：真正进了结果集的文档 access_count +1。
+    # 只统计返回给调用方的（不是所有召回的），且只算文档级不算 chunk 级 ——
+    # 一篇文档出两个 chunk 不该记两次。
+    hit_docs = {e["row"][1] for e in merged}
+    if hit_docs:
+        await _bump_access(list(hit_docs))
     out = []
     for e in merged:
         r = e["row"]
@@ -533,7 +633,9 @@ async def semantic_search(session: AsyncSession, user: User, q: str, limit: int 
     # embedding IS NULL 的 chunk 必须排掉：向量列是可空的（上游挂了就不写），
     # NULL 参与排序会挤占 LIMIT 名额。
     params: dict = {"vec": vec_str, "uid": user.id, "lim": limit}
-    extra = ""
+    # superseded 过滤必须和 search_chunks 一致。漏在这里等于给旧版本开了后门：
+    # 关键词路排掉了，向量路又把它捞回来融进 RRF。
+    extra = " AND d.superseded_by IS NULL"
     # 用 CAST(:x AS text) 而不是裸 :x —— asyncpg 对无类型参数推不出类型会报
     # AmbiguousParameterError（README 坑 1、2）
     if library:
@@ -574,15 +676,31 @@ TYPE_PRIORITY = {"project_summary": 0, "decision": 1, "preference": 1, "howto": 
 
 
 async def bootstrap_context(session: AsyncSession, user: User, project: str | None, token_budget: int = 4000) -> dict:
-    """项目压缩上下文包：总结+决策+偏好+术语，按 importance/updated_at 排序，按 token 预算截断。"""
-    conds = [Document.user_id == user.id, Document.deleted_at.is_(None)]
+    """项目压缩上下文包：按类型优先级 + 有效重要度排序，按 token 预算装箱。"""
+    conds = [Document.user_id == user.id, Document.deleted_at.is_(None),
+             # 被取代的旧版本不进开场包。给 agent 塞过时信息比少塞一篇危害大得多。
+             Document.superseded_by.is_(None)]
     if project:
         conds.append(Document.project == project)
     else:
         conds.append(Document.library == "main")
     docs = (await session.execute(select(Document).where(*conds))).scalars().all()
-    # 排序：类型优先级 → importance → updated_at
-    docs.sort(key=lambda d: (TYPE_PRIORITY.get(d.md_type, 9), -d.importance, -(d.updated_at.timestamp() if d.updated_at else 0)))
+
+    # 排序：类型优先级 → 有效重要度 → updated_at
+    #
+    # 有效重要度 = 手填 importance + 实际取用热度。
+    # 为什么要掺一个热度：实测 96% 的文档手填 importance≥4（人在写的时候
+    # 都觉得自己写的重要），这个字段已经没有区分度了。
+    # graph-memory 用 validatedCount（节点被重复提取到就 +1）解决同一个问题 ——
+    # 关键是那是**客观累积**的信号，不是写入时的自我评价。
+    # 这里用 access_count 做同样的事，但权重压得很小（最多顶 1 级），
+    # 因为热度只是"被读过"，不等于"重要"：一篇写错的文档也可能被反复检索到。
+    def eff_importance(d: Document) -> float:
+        heat = min(1.0, (d.access_count or 0) / 10.0)
+        return d.importance + heat
+
+    docs.sort(key=lambda d: (TYPE_PRIORITY.get(d.md_type, 9), -eff_importance(d),
+                             -(d.updated_at.timestamp() if d.updated_at else 0)))
 
     # 预算下限：低于这个数拼不出有意义的上下文，还不如报错让调用方改
     token_budget = max(200, int(token_budget))
@@ -629,6 +747,35 @@ async def bootstrap_context(session: AsyncSession, user: User, project: str | No
         # 后面的文档照样能收（这里判断错会让大预算也只返回 1 篇）。
         if budget_capped:
             break
+    # ── 关系补充：把 implements 关联的文档带进来 ──
+    # 命中一篇实现记录时，背后的决策文档往往才是 agent 真正需要的
+    # （"为什么这么做"比"怎么做的"更难从代码重建）。反之亦然。
+    # 只在预算还有余量时补，且明确标注 via="implements"，
+    # 让 agent 知道这几篇不是按重要度选出来的，而是被关联带出来的。
+    linked_extra: list[dict] = []
+    left = token_budget - used
+    if picked and left > META_COST + MIN_SLICE:
+        extras = await links_mod.expand_by_links(
+            session, user, [e["id"] for e in picked], max_extra=3)
+        chosen = {e["id"] for e in picked}
+        for d in extras:
+            if d.id in chosen:
+                continue
+            left = token_budget - used
+            if left <= META_COST + MIN_SLICE:
+                break
+            body = d.content or ""
+            content = body[:min(PER_DOC_CHARS, chars_for(left - META_COST))]
+            entry = {
+                "id": d.id, "title": d.title, "type": d.md_type, "project": d.project,
+                "tags": d.tags, "importance": d.importance,
+                "content": content, "truncated": len(content) < len(body),
+                "via": "implements",
+            }
+            picked.append(entry)
+            linked_extra.append({"id": d.id, "title": d.title})
+            used += est_tokens(content) + META_COST
+
     # digest 是给 agent 直接塞进开场的，也得守预算 —— 它不能比 documents 还长
     digest_parts: list[str] = []
     dused = 0
@@ -649,6 +796,8 @@ async def bootstrap_context(session: AsyncSession, user: User, project: str | No
         "estimated_tokens": used,
         "document_count": len(picked),
         "total_documents": len(docs),
+        # 哪几篇是被 implements 关系带出来的（不是按重要度选的）
+        "linked_extra": linked_extra,
         "digest": "\n".join(digest_parts),
         "documents": picked,
     }
@@ -658,6 +807,9 @@ async def sync_from_disk(session: AsyncSession, user: User) -> dict:
     """磁盘 → DB：扫 md 文件重建索引（含 git pull 后）。返回统计。"""
     root = user_root(settings.data_dir, user.id)
     added = updated = removed = 0
+    # links 要在全部文档都进 DB 之后再统一解析 —— 关系可能指向本次 sync
+    # 里更靠后才扫到的文件，边扫边解析会有一半解析不出来。
+    link_dirty: list[Document] = []
     lib_dirs = [p for p in root.iterdir() if p.is_dir() and not p.name.startswith(".")]
     for lib in lib_dirs:
         for f in lib.glob("*.md"):
@@ -676,15 +828,23 @@ async def sync_from_disk(session: AsyncSession, user: User) -> dict:
             if doc and doc.deleted_at:
                 # 从磁盘恢复（用户在别的机器 push 过）
                 doc.deleted_at = None
+                doc.links = normalize_links(meta.get("links"))
                 updated += 1
             elif doc:
                 if doc.content_hash != h or doc.content != content:
                     doc.content = content
                     doc.title = title
                     doc.content_hash = h
+                    doc.links = normalize_links(meta.get("links"))
                     doc.updated_at = _now()
                     updated += 1
                 else:
+                    # 内容没变但 frontmatter 的 links 可能改了（手改 md 或从别处 pull）
+                    fm_links = normalize_links(meta.get("links"))
+                    if fm_links != (doc.links or []):
+                        doc.links = fm_links
+                        updated += 1
+                        link_dirty.append(doc)
                     continue
             else:
                 doc = Document(
@@ -694,11 +854,13 @@ async def sync_from_disk(session: AsyncSession, user: User) -> dict:
                     tags=[str(t)[:32] for t in (meta.get("tags") or [])][:16],
                     importance=max(1, min(5, int(meta.get("importance") or 3))),
                     source=str(meta.get("source") or "disk")[:64],
+                    links=normalize_links(meta.get("links")),
                     content=content, rel_path=rel + ".md", content_hash=h,
                 )
                 session.add(doc)
                 added += 1
             await session.flush()
+            link_dirty.append(doc)
             # 从磁盘 sync 走到这里说明内容真的变了（上面按 content_hash 比过），
             # 所以向量也该重算。传 do_embed=True —— 早先写的 False 会让
             # 每次 sync/reindex 静默清空全库向量，配上 embedding 后才暴露出来。
@@ -712,9 +874,36 @@ async def sync_from_disk(session: AsyncSession, user: User) -> dict:
     for d in alive:
         if d.rel_path not in disk_paths:
             d.deleted_at = _now()
+            # 消失的文档如果曾经取代过别的文档，被取代者要重新可见
+            await links_mod.clear_supersede_marks(session, d)
             removed += 1
+    await session.flush()
+
+    # ── links 统一解析（必须在全部文档都进 DB 之后）──
+    # 先清空所有 supersede 标记再重建，而不是增量改：md 是 source of truth，
+    # 磁盘上没有的关系就不该在 DB 里留着。增量更新会让删掉一行 links 之后
+    # 目标文档永久隐身。
+    if link_dirty:
+        for d in (await session.execute(select(Document).where(
+                Document.user_id == user.id,
+                Document.superseded_by.is_not(None)))).scalars().all():
+            d.superseded_by = None
+        await session.flush()
+        all_alive = (await session.execute(select(Document).where(
+            Document.user_id == user.id, Document.deleted_at.is_(None)))).scalars().all()
+        link_unresolved = []
+        for d in all_alive:
+            if not d.links:
+                continue
+            rep = await links_mod.apply_links(session, user, d)
+            for u in rep["unresolved"]:
+                link_unresolved.append({"from": d.title, **u})
+    else:
+        link_unresolved = []
+
     await session.commit()
-    return {"added": added, "updated": updated, "removed": removed}
+    return {"added": added, "updated": updated, "removed": removed,
+            "link_unresolved": link_unresolved}
 
 
 class DuplicateError(Exception):

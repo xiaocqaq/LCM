@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# memorys 全量验收：十三套测试（单测本地 + 其余打公网 HTTPS）+ 服务状态 + 公网端点 + Hermes 侧闭环
+# memorys 全量验收：十四套测试（单测本地 + 其余打公网 HTTPS）+ 服务状态 + 公网端点 + Hermes 侧闭环
 cd /opt/memorys || exit 1
 export PYTHONPATH=/opt/memorys
 export MEM_TEST_BASE=https://repo.xlingo.fun
@@ -25,6 +25,7 @@ run branch_write_test   .venv/bin/python tests/branch_write_test.py
 run bootstrap_budget    .venv/bin/python tests/bootstrap_budget_test.py
 run rank_test           .venv/bin/python tests/rank_test.py
 run vec_search          .venv/bin/python tests/vec_search_test.py
+run links_test          .venv/bin/python tests/links_test.py
 run smoke_ready         .venv/bin/python tests/smoke_ready.py
 
 echo

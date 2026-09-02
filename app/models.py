@@ -45,6 +45,17 @@ class Document(Base):
     importance: Mapped[int] = mapped_column(Integer, default=3)
     source: Mapped[str] = mapped_column(String(64), default="")
     content: Mapped[str] = mapped_column(Text, default="")  # frontmatter 之后的正文
+    # 文档间关系。借自 graph-memory 的边模型，但只保留能改变检索行为的那几种，
+    # 且存在 frontmatter 里（md 仍是 source of truth，图关系不另立数据源）。
+    # 形如 [{"type": "supersedes", "target": "slug-or-title", "note": "为什么"}]
+    links: Mapped[list] = mapped_column(JSONB, default=list)
+    # 被别的文档 supersedes 时置位。检索与 bootstrap 默认跳过，
+    # 但文件还在、还能直接读 —— 「过时」不等于「删除」。
+    superseded_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 实际被取用的次数。手填的 importance 区分度会退化（实测 96% 的文档都填了 ≥4），
+    # 真正被反复读到的才是有用的知识。graph-memory 用 validatedCount 做同一件事。
+    access_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_accessed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     meta: Mapped[dict] = mapped_column(JSONB, default=dict)  # frontmatter 扩展字段原样保留
     rel_path: Mapped[str] = mapped_column(String(300))  # 相对用户根目录，如 main/xxx.md
     content_hash: Mapped[str] = mapped_column(String(64), default="")

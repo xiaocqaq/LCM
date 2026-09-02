@@ -6,7 +6,7 @@ KEY=$(cat /root/.memorys-hermes-key)
 BASE=https://repo.xlingo.fun
 DATA=/var/lib/memorys/data/users
 REAL_UID=u20        # 真实用户，其余目录都是测试产物
-PATTERNS='预算测试|预算-决策|预算-总结|公网-MCP|分支测试|只存在于分支|dd-a-|dd-b-|ui-demo|ui-w-|分支写入验证|UI分支写入|另存基线'
+PATTERNS='预算测试|预算-决策|预算-总结|公网-MCP|分支测试|只存在于分支|dd-a-|dd-b-|ui-demo|ui-w-|分支写入验证|UI分支写入|另存基线|短文-熔断降级|长文-系统运维|同长度-灰度发布|部署流程-v1|部署流程-v2|缓存层选型决策|缓存层落地记录|关系写错的文档|MCP关系测试'
 
 echo "=== 1. 切回主分支 ==="
 curl -s -X POST -H "X-Api-Key: $KEY" -H 'Content-Type: application/json' \

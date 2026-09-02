@@ -192,6 +192,21 @@ BM25 用 `b` 参数做这件事，`ts_rank` 没有。
 配置示例见 `.env.example`。注意 `MEM_EMBED_DIM` **必须**和上游实际返回的维度一致 ——
 hnsw 索引建在固定维度的表达式上，填错不报错而是索引静默失效。
 
+### 增量 reindex：向量按内容复用
+
+`_reindex_document` 先把旧 chunk 的「正文 → 向量」映射取出来，
+只给**内容真的变了**的 chunk 调 embedding 上游。
+
+这不是优化而是必须：一次全量 reindex 要给每个 chunk 调一次上游，
+而上游会随机 ReadTimeout（重试等 30s+）。实测 23 篇文档全量 reindex 超过 7 分钟，
+直接把 `POST /api/v1/sync` 打成超时。改成复用后同样的 sync 是 **0.18 秒**。
+
+复用的键是 chunk 正文本身，**不是 seq** —— 在文档中间加一节会让后面所有 chunk 的
+seq 整体位移，按 seq 复用等于把向量和内容错配，检索会返回莫名其妙的结果。
+
+只想让改过的同义词表生效、不想重算向量时，用 `tests/reindex_lex_only.py`
+（只 UPDATE tsv 列，不动 chunk 行）。
+
 ## Web UI
 
 - 项目文件夹树（按 type 分组，折叠状态本地保存）
@@ -278,7 +293,7 @@ ls /tmp/verify   # 数一下 md 文件，抽查 frontmatter
 
 ```bash
 export PYTHONPATH=.
-bash tests/acceptance.sh        # 一键跑全部十三套 + 服务状态 + 端点连通
+bash tests/acceptance.sh        # 一键跑全部十四套 + 服务状态 + 端点连通
 bash tests/cleanup.sh           # 清测试残留
 ```
 
@@ -293,6 +308,7 @@ bash tests/cleanup.sh           # 清测试残留
 .venv/bin/python tests/bootstrap_budget_test.py # token 预算 22 项
 .venv/bin/python tests/rank_test.py             # 排序质量 6 项
 .venv/bin/python tests/vec_search_test.py       # 向量检索契约 13 项
+.venv/bin/python tests/links_test.py           # 文档关系 30 项（supersedes/implements/撤销）
 .venv/bin/python tests/search_unit_test.py      # 分词与扩展 26 项
 .venv/bin/python tests/git_push_test.py         # GitHub 备份链路 13 项
 
@@ -372,6 +388,33 @@ bash tests/cleanup.sh           # 清测试残留
     但会让"多少 chunk 有向量"这类统计失真。chunk 是可重建的派生数据
 28. `_reindex_document(do_embed=False)` 会**丢掉已有向量** —— 它是先 DELETE 整行再重插。
     只想刷关键词索引就用 `tests/reindex_lex_only.py`
+29. **读路径里的写操作要用独立 session**。给检索命中的文档累加 `access_count` 时
+    挂在调用方 session 上，UPDATE 会随请求结束被丢掉 —— FastAPI 的 `get_session`
+    从不 commit。而且不该为了记账把检索变成写事务（调用方可能在更大的只读逻辑里）。
+    记账失败也绝不能影响检索本身，整段包 try。
+30. **关系必须能撤销，否则会造成永久隐身**。`supersedes` 让目标退出检索，
+    那么：改 links 要先清旧标记再重建；删除"取代者"要恢复被取代者；
+    从磁盘 sync 要整体重建而不是增量改。漏任何一条，都会出现
+    "某篇文档搜不到了但看不出为什么"。
+31. **sync 时 links 要在全部文档进 DB 之后再统一解析**。关系可能指向本次 sync
+    里更靠后才扫到的文件，边扫边解析会有一半解析不出来。
+32. **启动期 DDL 必须设 `lock_timeout`**（本项目最难查的一次故障）。
+    `ALTER TABLE` 要 ACCESS EXCLUSIVE 锁，只要有一个连接还占着该表的锁
+    （比如一个 `idle in transaction` 的孤儿连接），ALTER 就排队等待 ——
+    而 **PG 的锁队列是 FIFO：一个待授予的 ACCESS EXCLUSIVE 会挡住它后面
+    所有对该表的读写**。结果整张 `chunks` 表连 SELECT 都做不了，
+    检索/reindex/sync 全部挂死，表面症状只是"请求超时"，
+    完全看不出跟启动期 DDL 有关。
+    诊断方法：`pg_stat_activity` 看 `wait_event_type='Lock'`，
+    再用 `pg_blocking_pids()` 找源头。
+    修法：`SET lock_timeout = '3s'` + 幂等 DDL 先查状态再改
+    （`attstorage` 已是 `e` 就别再 ALTER）。
+33. **asyncpg 把 `"char"` 类型返回成 bytes**。`pg_attribute.attstorage` 拿到的是
+    `b'e'` 而不是 `'e'`，直接和字符串比永远不等 → "先查再改"的优化失效，
+    每次启动照样抢一次表锁。
+34. **诊断脚本一定要 `python -u` 或 `print(flush=True)`**。前几轮排查这个死锁时
+    脚本卡在 PG 等锁上，stdout 缓冲导致日志一直是空的，
+    看起来像"脚本自己挂了"，白绕了两圈。
 
 ### 测试
 
@@ -400,3 +443,94 @@ jieba / MCP SDK（钉 `<2`，2.x 把 `FastMCP` 改名 `MCPServer`）/
 ## License
 
 MIT
+
+---
+
+## 文档关系（links）
+
+参考 [graph-memory](https://github.com/adoresever/graph-memory) 的边模型加进来的，
+但只保留三种，且每种都必须**实际改变检索行为** —— 一条边如果不影响
+"该给 agent 看什么"，它就只是装饰。
+
+| type | 效果 |
+|---|---|
+| `supersedes` | 目标**从检索和 bootstrap 里退场**（文件仍在，仍可 `memory_get` 读） |
+| `implements` | 命中任一篇时把另一篇一起带进 bootstrap，标注 `via="implements"` |
+| `relates` | 仅作记录，不改检索 |
+
+写法（frontmatter 或 API 都行）：
+
+```yaml
+---
+title: 部署流程 v2
+type: howto
+links:
+  - type: supersedes
+    target: 部署流程 v1        # 标题、slug 或 "#123" 都能解析
+    note: v1 的手工 scp 已废弃
+---
+```
+
+手写 md 时也支持简写：`links: ["supersedes:部署流程 v1"]`。
+
+### 为什么需要这个
+
+实测库里有 **3 篇讲同一个项目工程结构的文档**（标题相似度 0.47-0.60，
+小节标题几乎一一对应），是同一份知识写了三遍。检索时三篇全命中，
+agent 无从判断该信哪个 —— 那比没有信息更糟。
+
+`supersedes` 不是删除：旧版本仍在磁盘、仍在 git 历史、仍能直接读，
+只是不再参与检索。「过时」和「不存在」是两件事。
+
+### 为什么不照搬整套图谱
+
+graph-memory 把知识拆成 `TASK/SKILL/EVENT` 三类节点 + 五类边，
+靠 LLM 从对话里自动抽取，再跑 Label Propagation 社区检测和 Personalized PageRank。
+那套东西解决的是**"对话流水如何变成结构化知识"**。
+
+memorys 的输入不是对话流水 —— 是 agent 或人**已经想清楚了才写下**的成篇记忆。
+所以：
+
+- **不需要抽取层**。写入时结构已经有了（type/project/tags/importance），
+  再上一层 LLM 抽取是把已有结构拆碎重组，纯损耗。
+- **不需要社区检测**。23 篇文档跑 Label Propagation 是自娱自乐；
+  `project` 字段已经是人工划好的社区，比算出来的准。
+- **不需要 PageRank**。图里只有几十条边，PPR 的收益来自图的连通密度，
+  这个规模下等于按边数排序。
+
+真正值得借的只有两个思路，都对应实测看到的具体问题：
+
+1. **版本关系**（对应它的 `PATCHES` 边 + 向量去重）→ `supersedes`
+2. **客观累积的重要度**（对应它的 `validatedCount`）→ `access_count`
+
+### access_count：手填 importance 的补充
+
+实测 **96% 的文档手填 `importance ≥ 4`** —— 人在写的时候都觉得自己写的重要，
+这个字段已经没有区分度了。
+
+graph-memory 用 `validatedCount`（节点被重复提取到就 +1）解决同一个问题。
+关键在于那是**客观累积**的信号，不是写入时的自我评价。
+
+这里用 `access_count`：真正进了检索结果集的文档才 +1。
+
+```
+有效重要度 = importance + min(1.0, access_count / 10)
+```
+
+权重刻意压到最多顶 1 级，因为热度只是"被读过"，不等于"重要" ——
+一篇写错的文档也可能被反复检索到。
+
+**热度只用在 bootstrap 的取舍上，不进检索打分**。检索里加热度会形成正反馈：
+排前面 → 被读到 → 排更前面，最后热门文档垄断所有查询。
+
+### 关系是软状态，随时可撤
+
+- 改 `links` 会先清掉旧的 supersede 标记再重建 —— 否则改了目标之后，
+  旧目标永久隐身且没有任何地方能看出原因
+- 删除一篇"取代者"时，被它取代的文档自动恢复可见
+- `sync_from_disk` 会**整体重建**所有关系而不是增量改：md 是 source of truth，
+  磁盘上没有的关系不该在 DB 里留着
+- 解析不出来的 target 会在 `linkReport.unresolved` 里报出来，不静默失败 ——
+  用户以为 supersedes 生效了、旧文档其实还在检索里，这种失败最难查
+
+查关系全貌：`GET /api/v1/documents/{id}/related`（出边 + 入边）。

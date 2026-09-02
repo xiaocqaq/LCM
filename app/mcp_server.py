@@ -13,6 +13,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from sqlalchemy import select
 
 from . import gitsvc, service
+from . import links as links_mod
 from .config import settings
 from .db import SessionLocal
 from .mdstore import user_root
@@ -93,6 +94,10 @@ async def memory_get(doc_id: int) -> str:
             "id": d.id, "title": d.title, "type": d.md_type, "library": d.library,
             "project": d.project, "tags": d.tags, "importance": d.importance,
             "source": d.source, "content": d.content,
+            "links": d.links or [],
+            # 非空说明这篇已被取代、默认搜不到。读到这个字段就该去看取代它的那篇。
+            "superseded_by": d.superseded_by,
+            "incoming_links": await links_mod.incoming_links(s, user, d),
             "updated_at": d.updated_at.isoformat() if d.updated_at else None,
             "content_hash": d.content_hash,
         })
@@ -110,6 +115,7 @@ async def memory_write(
     source: str = "agent",
     mode: str = "create",
     branch: str = "",
+    links: list[dict] | None = None,
 ) -> str:
     """写入一条记忆（md 格式落盘 + git 提交 + 建索引）。
 
@@ -119,11 +125,23 @@ async def memory_write(
     branch: 留空写当前分支（默认）。指定别的分支名则只提交到该分支的 git 历史，
         不落盘、不进检索索引，也不影响当前分支；分支不存在会自动创建。
         适合"这条还不确定要不要留"的草稿，或整理性的批量改写。
+    links: 与已有记忆的关系，形如
+        [{"type": "supersedes", "target": "旧记忆的标题或 slug", "note": "为什么取代"}]
+        三种类型，每种都会实际改变检索行为：
+          supersedes  这篇取代目标 → **目标从检索和 bootstrap 里退场**（文件仍在，
+                      仍可 memory_get 读）。同一件事写了新版本时务必标上，
+                      否则新旧两篇都会被搜到，读的人无从判断该信哪个。
+          implements  这篇是目标（决策/需求）的落地记录 → 命中任一篇时把另一篇
+                      一起带进 bootstrap（"为什么这么做"比"怎么做的"更难重建）。
+          relates     弱关联，仅作记录，不改检索。
+        target 写标题、slug 或 "#文档id" 都行。解析不出来会在返回里报
+        linkReport.unresolved，不会静默失败。
     """
     user = _user()
     payload = {
         "title": title, "content": content, "type": type, "project": project,
         "tags": tags or [], "importance": importance, "library": library, "source": source,
+        "links": links or [],
     }
     async with SessionLocal() as s:
         if branch:
@@ -147,6 +165,7 @@ async def memory_write(
             return _j({"ok": False, "error": "invalid", "message": f"写入失败：{e}"})
         return _j({"ok": True, "id": doc.id, "title": doc.title, "action": "created",
                    "path": f"{doc.library}/{doc.slug}.md",
+                   "linkReport": getattr(doc, "link_report", None),
                    "message": f"已写入 doc={doc.id}「{doc.title}」，已 git 提交。"})
 
 
@@ -160,10 +179,15 @@ async def memory_update(
     tags: list[str] | None = None,
     importance: int = 0,
     mode: str = "replace",
+    links: list[dict] | None = None,
 ) -> str:
     """更新一条已有记忆。只传需要改的字段。
 
     mode: replace（默认，content 整体替换）| append（content 追加到正文末尾）。
+    links: 传了就**整体替换**这篇的关系列表（传 [] 清空）。不传则保持原样。
+        整体替换而非合并是刻意的：关系需要能被删掉，
+        增量合并的话写错的 supersedes 就再也撤不掉了。
+        格式与 memory_write 相同。
     """
     user = _user()
     async with SessionLocal() as s:
@@ -187,10 +211,13 @@ async def memory_update(
             payload["tags"] = tags
         if importance:
             payload["importance"] = importance
+        if links is not None:
+            payload["links"] = links
         if not payload:
             return _j({"ok": False, "error": "empty", "message": "没有要更新的字段。"})
         d = await service.update_document(s, user, d, payload)
         return _j({"ok": True, "id": d.id, "title": d.title, "action": "updated",
+                   "linkReport": getattr(d, "link_report", None),
                    "message": f"已更新 doc={d.id}「{d.title}」，已 git 提交。"})
 
 

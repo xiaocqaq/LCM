@@ -10,6 +10,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from . import service
+from . import links as links_mod
 from .mcp_server import mcp
 from .config import settings
 from .db import SessionLocal, get_session, engine
@@ -25,17 +26,58 @@ async def lifespan(app: FastAPI):
     # 建表（幂等）
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # DDL 必须设 lock_timeout。
+        #
+        # 这里踩过一次线上级别的坑：下面的 ALTER TABLE 需要 ACCESS EXCLUSIVE 锁，
+        # 只要有任何一个连接还占着 chunks 的锁（比如一个 idle in transaction 的
+        # 孤儿连接），ALTER 就会排队等待 —— 而 PG 的锁队列是 FIFO：
+        # 一个**待授予**的 ACCESS EXCLUSIVE 会把它后面所有对该表的读写全部挡住。
+        # 结果是整张 chunks 表连 SELECT 都做不了，检索、reindex、sync 全部挂死，
+        # 表面症状是"请求超时"，完全看不出跟启动期 DDL 有关。
+        #
+        # 3 秒拿不到锁就放弃：这些 DDL 全是幂等的补列/建索引，
+        # 这次没做成下次启动会再试，绝不值得拿整张表的可用性去换。
+        await conn.execute(text("SET lock_timeout = '3s'"))
+
         # 索引与列调整（幂等）
         for stmt in [
             "CREATE INDEX IF NOT EXISTS idx_chunks_tsv ON chunks USING gin(tsv)",
             "CREATE INDEX IF NOT EXISTS idx_chunks_trgm ON chunks USING gin(content gin_trgm_ops)",
             "CREATE INDEX IF NOT EXISTS idx_documents_user_project ON documents(user_id, project) WHERE deleted_at IS NULL",
-            "ALTER TABLE chunks ALTER COLUMN embedding SET STORAGE EXTERNAL",
+            # 关系与热度字段。create_all 只建新表不改已有表，所以老库要靠这几句补列。
+            # 用 IF NOT EXISTS 保持幂等，比引 alembic 轻 —— 这个项目的 schema
+            # 变动是加列级别的，上迁移框架的维护成本大于收益。
+            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS links JSONB DEFAULT '[]'::jsonb",
+            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS superseded_by INTEGER",
+            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS access_count INTEGER DEFAULT 0",
+            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS last_accessed_at TIMESTAMPTZ",
+            # 检索每次都带 superseded_by IS NULL，走部分索引比全表过滤便宜
+            "CREATE INDEX IF NOT EXISTS idx_documents_not_superseded "
+            "ON documents(user_id) WHERE deleted_at IS NULL AND superseded_by IS NULL",
         ]:
             try:
                 await conn.execute(text(stmt))
             except Exception:
                 pass
+
+        # embedding 列的 TOAST 策略：向量是大值，EXTERNAL 关掉压缩省 CPU。
+        # 先查再改 —— 无条件 ALTER 每次启动都要抢 ACCESS EXCLUSIVE 锁，
+        # 而这个设置只需要生效一次。
+        try:
+            cur = (await conn.execute(text(
+                "SELECT attstorage FROM pg_attribute "
+                "WHERE attrelid = 'chunks'::regclass AND attname = 'embedding'"
+            ))).scalar()
+            # asyncpg 把 pg_attribute.attstorage（内部类型 "char"）返回成 bytes，
+            # 直接和字符串 "e" 比会永远不等 → 每次启动都白抢一次表锁。
+            if isinstance(cur, (bytes, bytearray)):
+                cur = cur.decode()
+            if cur and cur != "e":   # 'e' = EXTERNAL
+                await conn.execute(text(
+                    "ALTER TABLE chunks ALTER COLUMN embedding SET STORAGE EXTERNAL"))
+        except Exception:
+            pass
+
         # hnsw 索引维度必须跟 settings.embed_dim 一致，且写死在索引定义里。
         # 换模型换维度时旧索引会静默失效（表达式不匹配，PG 直接不用它，退化成全表扫描
         # 且不报错），所以这里按维度命名索引，并把不同维度的旧索引删掉。
@@ -166,11 +208,21 @@ async def revoke_key(key_id: int, ctx: AuthContext = Depends(auth), session: Asy
 def _doc_json(d: Document, with_content: bool = True) -> dict:
     out = {"id": d.id, "title": d.title, "type": d.md_type, "library": d.library, "project": d.project,
            "tags": d.tags, "importance": d.importance, "source": d.source,
+           "links": d.links or [],
+           # 非空表示这篇已被别的文档取代，默认不参与检索和 bootstrap
+           "supersededBy": d.superseded_by,
+           "accessCount": d.access_count or 0,
+           "lastAccessedAt": d.last_accessed_at.isoformat() if d.last_accessed_at else None,
            "createdAt": d.created_at.isoformat() if d.created_at else None,
            "updatedAt": d.updated_at.isoformat() if d.updated_at else None,
            "contentHash": d.content_hash}
     if with_content:
         out["content"] = d.content
+    # links 里有解析不出来的目标时必须让调用方看见：
+    # 用户以为 supersedes 生效了，实际旧文档还在检索里，静默失败最难查
+    report = getattr(d, "link_report", None)
+    if report:
+        out["linkReport"] = report
     return out
 
 
@@ -224,7 +276,38 @@ async def create_document(payload: dict, branch: str = "", ctx: AuthContext = De
 @app.get("/api/v1/documents/{doc_id}")
 async def get_document(doc_id: int, ctx: AuthContext = Depends(auth), session: AsyncSession = Depends(get_session)):
     d = await _get_doc(ctx, session, doc_id)
-    return _doc_json(d)
+    out = _doc_json(d)
+    # 反向关系：谁指向了这篇。单篇详情才查（要扫 JSONB），列表页不查。
+    # 有这个才能解释"为什么这篇文档搜不到了"—— 看到 supersededBy 指向谁。
+    out["incomingLinks"] = await links_mod.incoming_links(session, ctx.user, d)
+    return out
+
+
+@app.get("/api/v1/documents/{doc_id}/related")
+async def related_documents(doc_id: int, ctx: AuthContext = Depends(auth),
+                            session: AsyncSession = Depends(get_session)):
+    """这篇文档的关系全貌：出边（已解析）+ 入边。
+
+    单独开一个端点而不是塞进详情：UI 的关系面板是按需展开的，
+    详情页每次都算反向关系会让列表页和详情页的响应时间不一致。
+    """
+    d = await _get_doc(ctx, session, doc_id)
+    outgoing = []
+    for link in (d.links or []):
+        t = await links_mod.resolve_target(session, ctx.user, link.get("target") or "")
+        outgoing.append({
+            **link,
+            "resolved": bool(t),
+            "targetId": t.id if t else None,
+            "targetTitle": t.title if t else None,
+            "targetType": t.md_type if t else None,
+        })
+    return {
+        "id": d.id, "title": d.title,
+        "outgoing": outgoing,
+        "incoming": await links_mod.incoming_links(session, ctx.user, d),
+        "supersededBy": d.superseded_by,
+    }
 
 
 @app.patch("/api/v1/documents/{doc_id}")

@@ -9,7 +9,15 @@ import yaml
 
 VALID_TYPES = {"project_summary", "decision", "preference", "howto", "glossary", "fact"}
 
-FM_KEYS = ["id", "title", "type", "project", "tags", "importance", "source", "created_at", "updated_at"]
+# 文档间关系类型。参考 graph-memory 的边模型，但只保留**会改变检索行为**的三种 —
+# 一条边如果不影响"该给 agent 看什么"，它就只是装饰。
+#   supersedes  A 取代 B：B 从检索和 bootstrap 里退场（文件保留，可直接读）
+#   implements  A 是 B（决策/需求）的落地记录：命中 A 时把 B 一起带出来
+#   relates     弱关联：仅在 bootstrap 里作为补充候选，不影响排序
+LINK_TYPES = {"supersedes", "implements", "relates"}
+
+FM_KEYS = ["id", "title", "type", "project", "tags", "importance", "source",
+           "links", "created_at", "updated_at"]
 
 
 def now_iso() -> str:
@@ -61,6 +69,47 @@ def doc_path(data_dir: str, user_id: int, library: str, slug: str) -> Path:
 
 def render_document(meta: dict, content: str) -> str:
     return build_frontmatter(meta) + "\n" + content.rstrip() + "\n"
+
+
+def normalize_links(raw) -> list[dict]:
+    """校验并规范化 frontmatter 里的 links。
+
+    容错两种写法：
+      links: [{type: supersedes, target: old-doc, note: 原因}]
+      links: ["supersedes:old-doc"]              ← 手写 md 时的简写
+    非法 type 直接丢掉而不是报错 —— md 是用户手写的，一个拼错的关系
+    不该让整篇文档读不出来。
+    """
+    if not raw:
+        return []
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    out: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for item in raw[:32]:
+        if isinstance(item, str):
+            if ":" not in item:
+                continue
+            t, _, tgt = item.partition(":")
+            item = {"type": t.strip(), "target": tgt.strip()}
+        if not isinstance(item, dict):
+            continue
+        t = str(item.get("type") or "").strip().lower()
+        tgt = str(item.get("target") or "").strip()[:256]
+        if t not in LINK_TYPES or not tgt:
+            continue
+        key = (t, tgt)
+        if key in seen:
+            continue
+        seen.add(key)
+        e = {"type": t, "target": tgt}
+        note = str(item.get("note") or "").strip()[:300]
+        if note:
+            e["note"] = note
+        out.append(e)
+    return out
 
 
 def split_chunks(content: str, max_chars: int = 1600) -> list[dict]:
