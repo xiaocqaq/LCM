@@ -1,4 +1,21 @@
 .venv/
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+
+# 密钥与本地配置：只有 .env.example 进 git
 .env
+.env.*
+!.env.example
+
+# 运行时产物
+*.log
+tests/.*.log
+data/
+*.bundle
+
+# 编辑器
+.idea/
+.vscode/
+.DS_Store
