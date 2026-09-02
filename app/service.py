@@ -275,7 +275,14 @@ async def write_to_branch(session: AsyncSession, user: User, payload: dict,
 
 
 async def soft_delete_document(session: AsyncSession, user: User, doc: Document) -> Document:
+    """软删除：md 文件移进 .trash/，DB 行打 deleted_at，chunk 一并删掉。
+
+    chunk 必须删：它们已经检索不到（查询都带 deleted_at IS NULL），留着只会
+    让"多少 chunk 有向量"这类统计失真，也白占 pgvector 的存储和 hnsw 索引。
+    要恢复的话 restore 会重新 reindex，chunk 本来就是可重建的派生数据。
+    """
     doc.deleted_at = _now()
+    await session.execute(delete(Chunk).where(Chunk.document_id == doc.id))
     await session.flush()
     root = user_root(settings.data_dir, user.id)
     p = root / doc.rel_path
