@@ -21,7 +21,10 @@
   --bg:#f6f7f2; --panel:#fbfcf8; --panel2:#f0f3ed; --line:#e0e4dc;
   --line-soft:#e4e9e2;
   --text:#1d2a2a; --text-body:#2c3a37; --text-title:#173e36; --text-strong:#254b42;
-  --dim:#5f6b66; --faint:#6f7a75;   /* 实测校准：原 #7d8a84 只有 3.2:1 */
+  --dim:#5f6b66; --faint:#67716c;   /* 实测校准：#7d8a84 只有 3.2:1，#6f7a75 在
+                                        panel2 底色上也只有 3.97 —— 次级文字（时间、
+                                        篇数、占位符）大量落在 panel2 上，必须按最
+                                        差底色算。#67716c 在 panel2 上 4.51 达标 */
   --accent:#1e5d50; --accent-fg:#fdfdf9; --accent-text:#185d50;
   --accent-hover:#1b715e; --accent-bar:#29806c;
   --accent2:#59a989; --warn:#b87a2a; --danger:#a85246;
@@ -29,6 +32,8 @@
   --pre-bg:#19302b; --pre-border:#253b37; --pre-text:#d5eee5;
   --hover:#e7eee6; --active:#dcece3;
   --line-strong:#c8d2cc;   /* 交互组件边框，要够 3:1 才有可点击感 */
+  --date-dim:#8c9691;      /* 日期的"退到背景"色：2.96:1。比正文弱一档但仍可读，
+                              别用 --line-strong（1.5:1，那是边框色，当文字等于隐形） */
   --star-on:#a8700a;       /* 实星：琥珀压深到 ≥3:1（实测 #d9941f 只有 2.97） */
   --star-off:#828e88;      /* 空星：不透明中灰，实测 ≥3:1。别用半透明琥珀 ——
                               alpha 的对比度取决于背后是什么，换到卡片/hover 态就失效；
@@ -41,7 +46,7 @@ html[data-theme="dark"]{
   --bg:#0f1614; --panel:#17211f; --panel2:#131c19; --line:#253230;
   --line-soft:#222e2b;
   --text:#dde6e2; --text-body:#c9d5d0; --text-title:#edf5f1; --text-strong:#e4efea;
-  --dim:#8a9893; --faint:#78857f;
+  --dim:#8a9893; --faint:#8b9791;   /* 暗底同理：#78857f 在 panel 上仅 4.29 */
   --accent:#2c8f76; --accent-fg:#f1fbf7; --accent-text:#6fd3b0;
   --accent-hover:#7fdcbb; --accent-bar:#46b592;
   --accent2:#4fb589; --warn:#d9a45c; --danger:#f0a396;
@@ -49,6 +54,7 @@ html[data-theme="dark"]{
   --pre-bg:#16221f; --pre-border:#22302c; --pre-text:#d5eee5;
   --hover:#1d2926; --active:#1b3b32;
   --line-strong:#33423e;
+  --date-dim:#6d7a75;      /* 暗底日期弱化色 */
   --star-on:#e0a83c;       /* 暗底上琥珀有 9.3:1 余量，可以用饱和色 */
   --star-off:#6b756f;      /* 暗底空星：实测 ≥3:1 */
   --shadow:rgba(0,0,0,.40);
@@ -64,26 +70,85 @@ html[data-theme="dark"]{
 *{box-sizing:border-box}
 html,body{margin:0;height:100%}
 body{background:var(--bg);color:var(--text-body);font:14px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
-button{font:inherit;cursor:pointer;border-radius:8px;padding:7px 13px;background:var(--panel);color:var(--text);border:1px solid var(--line-strong)}
+
+/* ── 图标 ──
+   currentColor 是关键：选中态文字变色时图标跟着变，emoji 做不到这件事。
+   vertical-align 用 -.14em 而不是 middle —— middle 对齐的是 x-height 中点，
+   中文字符没有明显的 x-height，视觉上会偏高。 */
+.ic{width:16px;height:16px;flex:0 0 16px;fill:none;stroke:currentColor;
+    stroke-width:1.75;stroke-linecap:round;stroke-linejoin:round;
+    vertical-align:-.14em}
+.ic.sm{width:14px;height:14px;flex-basis:14px;stroke-width:1.9}
+.ic.lg{width:18px;height:18px;flex-basis:18px;stroke-width:1.7}
+/* 实心图标（folder/heart 之类）单独开，描边版在小尺寸下辨识度不够 */
+.ic.solid{fill:currentColor;stroke:none}
+/* 按钮统一：一套圆角(8px)、一套描边、只有 .primary 是实心。
+   inline-flex + gap 让"图标+文字"不用手写间距，也不会因为 emoji 宽度不定而错位。 */
+button{font:inherit;cursor:pointer;border-radius:8px;padding:7px 13px;background:var(--panel);
+       color:var(--text);border:1px solid var(--line-strong);
+       display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
 button:hover{border-color:var(--accent-bar);background:var(--hover)}
 button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid var(--accent-bar);outline-offset:1px}
 /* 图标按钮：正方形，跟文字按钮同高 */
-button.icon{padding:7px 9px;line-height:1}
+button.icon{padding:7px 8px;line-height:1;justify-content:center}
 button.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-fg);font-weight:600}
 button.primary:hover{background:var(--accent-btn-hover);border-color:var(--accent-btn-hover)}
 /* ghost = 次级操作：无描边，hover 才出淡底。
    这样一屏里只有 .primary 是视觉重点，不会五个按钮抢同一个位置。 */
 button.ghost{background:transparent;border-color:transparent}
 button.ghost:hover{background:var(--hover);border-color:var(--line)}
-/* link 型：用强调色表明可点（纯灰文本会跟旁边的说明文字混在一起） */
-button.link{color:var(--accent-text);font-weight:600;background:var(--active);
-            border-color:var(--accent-bar);padding:6px 12px;border-radius:999px}
-button.link:hover{background:var(--hover);border-color:var(--accent-bar);text-decoration:underline}
+/* link 型：低调的次级动作，只有 hover 才显形。
+   原来做成了带底色的绿色胶囊，跟 .primary 抢视觉重量 —— 一屏里只该有一个实心重点。 */
+/* .link 是"hover 才显形"的次要操作。但完全无边框时它跟旁边的静态灰字（统计数字、
+   说明文案）长得一样，用户看不出能点 —— 所以底色透明但**保留一条虚线下边框**做
+   可供性提示，成本比一整圈边框低，又不会跟 primary 抢视觉重量。 */
+button.link{color:var(--dim);font-weight:500;background:transparent;
+            border-color:transparent;padding:5px 9px;border-radius:7px;font-size:13px;
+            text-decoration:underline;text-decoration-style:dotted;
+            text-decoration-color:var(--line-strong);text-underline-offset:3px}
+button.link:hover{background:var(--hover);border-color:var(--line);color:var(--text)}
 button.danger{background:transparent;border-color:var(--line);color:var(--danger)}
-button.danger:hover{border-color:var(--danger)}
+button.danger:hover{border-color:var(--danger);background:var(--hover)}
+/* 分段控件：两态互斥的视图切换（列表/平铺）。
+   比"切到 X"这种按钮好在能同时看到"有哪些选项"和"现在在哪个"。 */
+.seg{display:inline-flex;border:1px solid var(--line-strong);border-radius:8px;overflow:hidden}
+.seg button{border:0;border-radius:0;background:transparent;color:var(--dim);padding:7px 11px}
+.seg button+button{border-left:1px solid var(--line-strong)}
+.seg button:hover{background:var(--hover);color:var(--text)}
+.seg button.on{background:var(--active);color:var(--accent-text);font-weight:600}
+
 input,select,textarea{font:inherit;background:var(--panel);color:var(--text);border:1px solid var(--line-strong);border-radius:8px;padding:8px 11px;width:100%}
 input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent-bar)}
 ::placeholder{color:var(--dim);opacity:1}
+/* 原生 select 的系统箭头是"没做样式"最明显的信号之一。
+   去掉 appearance 自己画一个 chevron，尺寸/颜色才能跟其他控件对齐。 */
+select{appearance:none;-webkit-appearance:none;padding-right:30px;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' fill='none' stroke='%235f6b66' stroke-width='1.75' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m4 6.5 4 4 4-4'/%3E%3C/svg%3E");
+  background-repeat:no-repeat;background-position:right 9px center}
+html[data-theme="dark"] select{
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' fill='none' stroke='%238a9893' stroke-width='1.75' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m4 6.5 4 4 4-4'/%3E%3C/svg%3E")}
+/* 带前置图标的输入框：图标绝对定位，输入框自己留左内边距。
+   放大镜是"这是搜索"最强的语义信号，比 placeholder 里写"问点什么"有效。 */
+.ifield{position:relative;display:flex;flex:1;min-width:200px}
+.ifield>.ic{position:absolute;left:12px;top:50%;transform:translateY(-50%);
+            color:var(--dim);pointer-events:none}
+.ifield input{padding-left:36px}
+/* 检索页的主入口：输入框加高，整行左对齐跟结果列表同一条轴。
+   原来是 930×34 的一条细缝（宽高比 27:1），而它是全站最重要的入口，
+   高度却用了默认表单控件的值；主按钮 54×30 是整行最小的元素，视觉权重完全倒挂。
+   注意不要居中 —— 结果列表是左对齐的，工具条居中会形成两条对齐轴。 */
+.searchbar{display:flex;gap:8px;align-items:stretch;max-width:760px;margin:14px 0 4px}
+.searchbar .ifield{flex:1;min-width:0}
+.searchbar input,.searchbar select,.searchbar button{height:46px}
+.searchbar input{font-size:15px;padding-left:42px;border-radius:10px}
+.searchbar .ifield>.ic{left:15px;width:18px;height:18px;flex-basis:18px}
+.searchbar select{width:auto;min-width:118px;border-radius:10px}
+.searchbar button{padding:0 22px;border-radius:10px;font-size:14px;justify-content:center}
+/* 回车提示：不写的话用户不知道能直接回车，只会去点那个远在 700px 外的按钮 */
+.searchbar .kbd{position:absolute;right:12px;top:50%;transform:translateY(-50%);
+  font-size:11px;color:var(--faint);border:1px solid var(--line-strong);
+  border-radius:5px;padding:1px 5px;pointer-events:none;background:var(--panel2)}
+.searchbar input:placeholder-shown ~ .kbd{opacity:0}
 textarea{resize:vertical;font-family:'DM Mono',SFMono-Regular,Consolas,'Noto Sans Mono CJK SC',monospace;line-height:1.7}
 a{color:var(--accent);text-decoration:none}
 .hidden{display:none!important}
@@ -99,90 +164,344 @@ a{color:var(--accent);text-decoration:none}
 #login h1{margin:0 0 4px;font-size:22px;color:var(--text-title);letter-spacing:-.2px}
 
 /* 主框架 */
-#appview{height:100%;display:grid;grid-template-columns:250px 1fr;grid-template-rows:56px 1fr}
-header{grid-column:1/3;display:flex;align-items:center;justify-content:space-between;padding:0 16px;border-bottom:1px solid var(--line);background:var(--panel);backdrop-filter:saturate(140%) blur(8px)}
-aside{border-right:1px solid var(--line);padding:14px;overflow:auto;background:var(--panel2)}
-main{overflow:auto;padding:18px}
-.brand{font-weight:700;letter-spacing:.5px}
-.brand span{color:var(--accent-bar)}
-.navitem{padding:8px 10px;border-radius:9px;cursor:pointer;color:var(--dim)}
+#appview{height:100%;display:grid;grid-template-columns:232px 1fr;grid-template-rows:52px 1fr}
+header{grid-column:1/3;display:flex;align-items:center;justify-content:space-between;padding:0 14px 0 16px;border-bottom:1px solid var(--line);background:var(--panel)}
+aside{border-right:1px solid var(--line);padding:10px 10px 20px;overflow-y:auto;background:var(--panel2)}
+/* 侧栏滚动条改成细 overlay。原来是带上下箭头按钮的系统滚动条，
+   在浅色侧栏上成了整页最强的垂直线，抢走视觉注意力还显旧。 */
+aside{scrollbar-width:thin;scrollbar-color:var(--line-strong) transparent}
+aside::-webkit-scrollbar{width:8px}
+aside::-webkit-scrollbar-track{background:transparent}
+aside::-webkit-scrollbar-thumb{background:var(--line-strong);border-radius:99px;
+  border:2px solid var(--panel2);background-clip:padding-box}
+aside::-webkit-scrollbar-thumb:hover{background:var(--faint);background-clip:padding-box}
+/* 主区同样收窄滚动条，并给内容设上限宽度。
+   原来内容贴边撑满 1440，中英混排下行长过长（单行 70 个汉字，舒适区是 35-45）。 */
+main{overflow-y:auto;padding:20px 28px 40px;scrollbar-width:thin;scrollbar-color:var(--line-strong) transparent}
+main::-webkit-scrollbar{width:10px}
+main::-webkit-scrollbar-track{background:transparent}
+main::-webkit-scrollbar-thumb{background:var(--line-strong);border-radius:99px;
+  border:3px solid var(--bg);background-clip:padding-box}
+main::-webkit-scrollbar-thumb:hover{background:var(--faint);background-clip:padding-box}
+/* 内容列限宽。1440 视口下不限宽会让行长到 70 个汉字（舒适区 35-45），
+   而且树的元数据列会被甩到屏幕最右边，造成长距离横向扫视。 */
+/* 内容列宽度的三次调整，记下来免得再绕：
+   1020 左对齐 → 右侧死白 160px、左侧 28px，5:1 不对称很显眼；
+   1120        → 右白降到 60px，但行内标题被拉得过长，元数据被甩到屏幕边缘；
+   880 + 居中（现在）→ 14px 中文标题 ~40 字落在舒适行宽内，左右留白对称。
+   注意宽度必须配 margin-inline:auto —— 只设 max-width 的话内容仍然贴左，
+   "外部留白比内部间隙还大" 是同一个错误的两种表现。 */
+main > section{max-width:880px;margin-inline:auto}
+/* 说明性长文（MCP 配置那种）单独收更窄，纯阅读内容 68ch 是上限 */
+.prose{max-width:70ch}
+.brand{font-weight:700;letter-spacing:.3px;font-size:15px;display:flex;align-items:center;gap:7px;color:var(--text-title)}
+/* 品牌名必须整体包在一个元素里。
+   .brand 是 flex，裸文本节点 "memory" 和 <span>s</span> 会各自成为 flex item，
+   被 gap:7px 拆成 "memory s" —— 看起来像字符串拼接出的 bug。 */
+.brand .wm{display:inline}
+.brand .wm span{color:var(--accent-bar)}
+.brand .ic{color:var(--accent-bar)}
+/* 导航项：图标 + 文字用 flex 对齐。
+   选中态的左侧竖条改用 box-shadow inset 而不是 border-left ——
+   border 会让选中项的文字整体右移 2px，切换时看得出跳动。 */
+.navitem{padding:6px 9px;border-radius:8px;cursor:pointer;color:var(--dim);font-size:13px;
+         display:flex;align-items:center;gap:9px}
 .navitem:hover{background:var(--hover);color:var(--text)}
-.navitem.on{background:var(--active);color:var(--accent-text);border-left:2px solid var(--accent-bar);font-weight:600}
-.sec{margin:18px 0 6px;font-size:11px;letter-spacing:.09em;color:var(--dim);font-weight:700;text-transform:uppercase}
+.navitem.on{background:var(--active);color:var(--accent-text);font-weight:600;
+            box-shadow:inset 2px 0 0 var(--accent-bar)}
+.navitem .ic{color:var(--faint)}
+.navitem:hover .ic{color:var(--dim)}
+.navitem.on .ic{color:var(--accent-bar)}
+/* 项目项：名字可能很长，要能截断而不是把计数挤出去 */
+.navitem .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}
+/* 侧栏项目：跟主区的树是同一份数据，这里只当快捷跳转。
+   计数带上"篇"跟主区口径一致（原来侧栏是裸数字、主区写"8 篇"）。
+   项目多了会把上面的功能入口挤出视口，所以给项目区单独限高滚动。 */
+#libs{max-height:34vh;overflow-y:auto;scrollbar-width:thin;scrollbar-color:var(--line-strong) transparent}
+#libs::-webkit-scrollbar{width:6px}
+#libs::-webkit-scrollbar-thumb{background:var(--line-strong);border-radius:99px}
+#libs .tcount{flex:0 0 auto}
+/* 侧栏分区标题。10.5px + 字距 + uppercase 那一套是给拉丁字母设计的：
+   中文没有大小写（uppercase 无效），加字距只会把"记忆"两个字拆散，
+   在这个尺寸下已经小到接近不可读。提到 11.5px、去掉字距、色阶提一档到 --dim。 */
+.sec{margin:16px 0 4px;padding:0 9px;font-size:11.5px;color:var(--dim);font-weight:700}
+.sec:first-child{margin-top:4px}
 
 /* 列表 */
-.card{background:var(--panel);border:1px solid var(--line-strong);border-radius:var(--radius);padding:14px;margin-bottom:12px}
-.card h3{color:var(--text-title)}
-.card h3{margin:0 0 6px;font-size:15px}
+/* 卡片给一层极轻阴影：原来只有描边，而描边跟背景色差极小（浅灰绿底上的近白色线），
+   边界几乎看不见却仍吃掉内边距，读起来像"偶然出现的矩形"而不是一个面。 */
+.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+      padding:16px;margin-bottom:12px;box-shadow:0 1px 2px var(--shadow)}
+.card h3{color:var(--text-title);margin:0 0 8px;font-size:14.5px;font-weight:650;letter-spacing:-.1px}
+/* 卡片小标题：带图标的那种，用 flex 免得图标和文字基线错开 */
+.card h3.ih{display:flex;align-items:center;gap:8px}
+.card h3.ih .ic{color:var(--accent-bar)}
 .doc{cursor:pointer}
-.doc:hover{border-color:var(--accent-bar)}
-.snippet{color:var(--pre-text);background:var(--pre-bg);border:1px solid var(--line);border-radius:10px;padding:10px;white-space:pre-wrap;max-height:120px;overflow:hidden;font-size:13px}
+.doc:hover{border-color:var(--accent-bar);box-shadow:0 2px 8px var(--shadow)}
+.snippet{color:var(--pre-text);background:var(--pre-bg);border:1px solid var(--pre-border);border-radius:8px;padding:10px 12px;white-space:pre-wrap;max-height:120px;overflow:hidden;font-size:12.5px;line-height:1.6}
+
+/* ── 空状态 ──
+   原来搜索页首屏是纯背景色，72% 的屏幕不给任何信息，而且"还没搜"
+   "在搜""搜不到"三种情况长得一样。
+   **左对齐**而不是居中：结果列表是左对齐的，空状态居中会让内容
+   在"搜之前/搜之后"之间横向跳一次。一个页面只该有一条对齐轴。 */
+/* 空状态文案的宽度要跟同页其他内容一致（760），否则同一列里出现两套换行边界：
+   说明文字在 560 处折行、示例胶囊也跟着提前换行，看着像没对齐。
+   560 还会逼出"token。"这种两字孤行。 */
+.empty{padding:26px 2px 40px;color:var(--dim);max-width:760px}
+.empty .ic{width:26px;height:26px;flex-basis:26px;stroke-width:1.4;color:var(--line-strong);margin-bottom:12px}
+.empty h4{margin:0 0 7px;font-size:16px;color:var(--text-title);font-weight:650;letter-spacing:-.2px}
+.empty p{margin:0;font-size:13px;line-height:1.75}
+/* 示例问句：把 placeholder 里塞不下的引导搬出来，还能一键试。
+   要有底色 —— 纯细描边的胶囊会被读成只读标签，看不出能点。 */
+.chips{display:flex;gap:8px;flex-wrap:wrap;margin-top:20px}
+.chip{font-size:12.5px;padding:6px 13px;border-radius:999px;border:1px solid var(--line-strong);
+      background:var(--panel2);color:var(--text-body);cursor:pointer;transition:.12s;
+      display:inline-flex;align-items:center;gap:6px}
+.chip .ic{width:12px;height:12px;flex-basis:12px;color:var(--faint)}
+.chip:hover{border-color:var(--accent-bar);color:var(--accent-text);background:var(--active)}
+.chip:hover .ic{color:var(--accent-bar)}
+/* 骨架屏：让"正在搜"和"没结果"区分开 */
+.skel{height:64px;border-radius:var(--radius);margin-bottom:10px;border:1px solid var(--line);
+      background:linear-gradient(90deg,var(--panel) 25%,var(--panel2) 37%,var(--panel) 63%);
+      background-size:400% 100%;animation:sk 1.3s ease-in-out infinite}
+@keyframes sk{0%{background-position:100% 0}100%{background-position:0 0}}
+@media (prefers-reduced-motion:reduce){.skel{animation:none}}
 /* 文件夹树（项目 → 类型 → 文档） */
-.tree{background:var(--panel);border:1px solid var(--line-strong);border-radius:var(--radius);padding:6px 4px 20px}
+.tree{background:var(--panel);border:1px solid var(--line-strong);border-radius:var(--radius);padding:4px 6px 10px}
 .tnode{border-radius:9px}
-.trow{display:flex;align-items:center;gap:8px;padding:7px 10px;border-radius:9px;cursor:pointer;user-select:none}
+/* 行高从 7px 内边距压到 5px：这是索引型密集数据，不是内容卡片。
+   原来一行占 39px，一屏只装得下 2 个项目，滚动很长而信息很少。 */
+.trow{display:flex;align-items:center;gap:7px;padding:5px 9px;border-radius:8px;cursor:pointer;user-select:none}
 .trow:hover{background:var(--hover)}
 .trow:focus-visible,.tdoc:focus-visible{outline:2px solid var(--accent-bar);outline-offset:-2px}
-/* 三角热区做到 20px，字形只有 10px 太难点 */
-.tcar{width:20px;flex:0 0 20px;color:var(--dim);font-size:10px;transition:transform .12s;text-align:center}
+/* 折叠指示：SVG chevron 旋转。原来用 ASCII ▶ —— 两个字形光学大小不同、
+   垂直居中不准，且没法做过渡动画。热区仍保持 18px（字形只有 10px 太难点）。 */
+.tcar{width:18px;flex:0 0 18px;display:flex;align-items:center;justify-content:center;
+      color:var(--faint);transition:transform .14s ease}
+.tcar .ic{width:13px;height:13px;flex-basis:13px;stroke-width:2}
 .tcar.open{transform:rotate(90deg)}
-.tname{font-weight:600}
-.tcount{color:var(--dim);font-size:12px}
-.tkids{padding-left:15px;border-left:1px solid var(--line-strong);margin-left:19px}
+.tcount{color:var(--faint);font-size:12px;font-variant-numeric:tabular-nums}
+/* 每级缩进必须有明确台阶。实测第一版三级的文字左边缘是 324 / 330 / 347px
+   （相邻只差 6px 和 17px），层级读起来像"没对齐"而不是"有嵌套"。
+   现在每下一级整体缩进 22px，文字左边缘约 324 / 346 / 368。 */
+.tkids{padding-left:22px;border-left:1px solid var(--line);margin-left:12px}
 .tkids.hidden{display:none}
-/* 项目之间留呼吸；滚动时项目名钉住，长列表里不会丢失上下文 */
-.tree > .tnode + .tnode{margin-top:16px;border-top:1px solid var(--line);padding-top:14px}
-.tree > .tnode > .trow{position:sticky;top:-6px;background:var(--panel);z-index:1}
+/* 项目之间留呼吸；滚动时项目名和类型名都钉住，长列表里不会丢失上下文。
+   钉住的行必须有不透明底色，否则滚过去的内容会透上来。
+   两级 sticky 的 top 值要错开：项目行贴顶，类型行停在项目行下方一行的位置。 */
+/* 项目之间的间距必须显著大于类型组之间的间距（22px），否则顶层边界不够硬，
+   整卡读起来是一片连续文本，没有可以停顿的"块"。26 : 22 太接近，拉到 34 : 22。 */
+.tree > .tnode + .tnode{margin-top:20px;border-top:1px solid var(--line);padding-top:14px}
+.tree > .tnode > .trow{position:sticky;top:-4px;background:var(--panel);z-index:2}
+.tnode .tnode > .trow{position:sticky;top:26px;background:var(--panel);z-index:1}
+/* 三级层级要有字号/字重台阶，不能只靠缩进 —— 否则读者得"数缩进"才知道在第几层。
+   台阶方向很关键：类型行本质是**分隔标签**不是内容，要往下压（小、灰、加字距）；
+   文档标题是唯一的阅读主体，要提上来（大、近黑）。
+   一开始把两级都做成 13px 只差字重，结果长标题的墨量比 3 个字的类型名还重，
+   视觉上标题反倒更"大"，台阶等于没有。 */
+.tree > .tnode > .trow .tname{color:var(--text-title);font-size:16px;font-weight:700;letter-spacing:-.2px}
+/* 类型行做成"微标签/分隔条"，不是列表项：压矮行高 + 压小字号 + 提一档灰。
+   之前它跟文档行几乎同一条起跑线、字号只差 1px，快扫时读成"两级 + 一个装饰"。
+   **不要给中文加 uppercase / letter-spacing**：CJK 没有大小写，uppercase 完全无效，
+   而字距只会把"项目总结"拆成四个孤立的字，看着更散更小。
+   拉丁字母标签才吃这一套 —— 这里的标签是中文，所以只调字号/字重/颜色。 */
+.tnode .tnode > .trow{padding:1px 0;gap:5px}
+.tnode .tnode > .trow .tname{color:var(--dim);font-size:12px;font-weight:600}
+.tnode .tnode > .trow .tcount{font-size:11px}
 .tname{color:var(--text-strong)}
-/* 类型层用强调色，让墨绿在页面里形成体系而不是只出现两处 */
-.tnode .tnode .tname{color:var(--accent-text)}
+.trow .ic{color:var(--faint)}
+.tree > .tnode > .trow .ic{color:var(--accent-bar)}
+/* 类型行的图标也压小压淡：它是标签的一部分，不该跟内容图标一样重 */
+.tnode .tnode > .trow > .ic{width:12px;height:12px;flex-basis:12px;color:var(--line-strong)}
+/* 分组靠留白而不是分割线。类型组头「上方留白 : 下方留白」要拉到 2.5:1 以上，
+   否则在等距的行阵里人眼辨认不出"这里断开了"。
+   第一次做成 14px : 2px（≈1.4:1），肉眼几乎看不出分组。 */
+.tnode .tnode{margin-top:22px}
+.tnode .tnode:first-child{margin-top:2px}
+.tnode .tnode > .trow{padding-bottom:1px;margin-bottom:2px}
 .card{transition:border-color .12s}
-/* 文档行：三列网格。星级左对齐成列才能横向比较，右对齐只能一颗颗数。
-   日期用 tabular-nums，否则不同数字宽度会让这一列抖。 */
-/* 左侧留一个空的三角位（padding-left 30px），让文档行真正退后一格：
-   类型行是 [三角20][图标][名字]，文档行不缩进的话图标会跟类型图标几乎平齐。 */
-/* 星级/日期必须是固定列，才能竖着扫一眼比高低。
-   试过用 max-content 让它们紧跟标题，结果每行位置都不同，反而更难读 —— 别再改回去。
-   标题列给 max-width 收窄，避免元数据被甩到屏幕最右边造成长距离横跳。 */
-.tdoc{display:grid;grid-template-columns:20px minmax(0,1fr) 76px 84px;gap:12px;
-      align-items:center;max-width:1020px;
-      padding:6px 10px 6px 30px;border-radius:9px;cursor:pointer}
+/* 文档行：四列网格。
+   星级左对齐成列才能横向比较，右对齐只能一颗颗数。
+   日期用 tabular-nums，否则不同数字宽度会让这一列抖。
+   标题列给 max-width 收窄，避免元数据被甩到屏幕最右边造成长距离横跳。
+   试过用 max-content 让元数据紧跟标题，结果每行位置都不同，反而更难读 —— 别再改回去。 */
+/* 文档行：三列网格 [标题][重要度][时间]。
+   元数据必须收成一个紧凑簇并整体右对齐 —— 之前把重要度放在标题和时间中间、
+   左右各留几十像素空隙，那个点就"漂"在空白带里，既不跟标题关联也不跟时间关联。
+   标题列 minmax(0,1fr) + ellipsis，元数据列位置固定，眼睛才有一条稳定的扫视轴。
+   去掉了行首的文件图标：这一行必然是文档、类型又已由组头给出，那个图标零信息量还占 26px。 */
+/* padding-left 30 而不是 8：文档行没有"折叠箭头 + 类型图标"这个 30px 前缀列，
+   如果只靠 .tkids 的 22px 缩进，标题会落在类型名的正下方（实测 L2=342 / L3=345，
+   只差 3px），三级台阶又塌了。补上这一段，实测变成 324 / 342 / 367。
+
+   max-width 而不是撑满卡片：标题普遍在中段就结束，时间贴最右缘时中间有 ~800px
+   纯空白，横向跳视成本极高（"这个时间是哪一行的？"）。
+   试过加斑马纹引导，但明度差小到几乎连成一片，没用 —— 真正的解法是**把行封顶**，
+   让元数据紧跟在可读行宽的末尾，而不是被甩到屏幕边缘。 */
+.tdoc{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:12px;
+      align-items:center;max-width:760px;
+      padding:5px 10px 5px 30px;border-radius:8px;cursor:pointer}
 .tdoc:hover{background:var(--hover)}
 .tdoc:hover .tt{color:var(--accent-text)}
-.tdoc .tt{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.tdoc .tm{color:var(--dim);font-size:12px}
-.tdoc .td{color:var(--dim);font-size:12px;text-align:right;font-variant-numeric:tabular-nums}
-.imp{font-size:14px;letter-spacing:1.5px;color:var(--star-on);justify-self:start;line-height:1}
-.imp i{color:var(--star-off);font-style:normal}
-/* 星级列宽度按 13px 字号重算，否则会挤掉日期 */
-
-.toolbar{display:flex;gap:8px;align-items:center;margin-bottom:14px;flex-wrap:wrap}
+/* 文档标题是这一屏唯一的阅读主体，14px 近黑 */
+.tdoc .tt{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px;color:var(--text-body)}
+.tdoc .td{color:var(--faint);font-size:12px;text-align:right;font-variant-numeric:tabular-nums;
+          min-width:52px;white-space:nowrap}
+/* 日期部分压灰、时分留在前台：同一批写入的文档日期都一样（一屏 15 行全是"昨天"），
+   重复的那半截应该退到背景，有区分度的时分才该被读到。 */
+.tdoc .td .dd{color:var(--date-dim)}
+/* 热度：客观累积的读取次数，比手填的 importance 有区分度。
+   实测 access_count 分布 0→24（方差大），importance 有 52% 都是 5 分（几乎没方差）。
+   只给"被读过 ≥5 次"的文档显示，格式 "×9" —— 稀疏才是信号。 */
+/* 热度徽标：客观读取次数。**必须比主按钮弱**。
+   第一版用了 accent 绿 + 绿底，结果它成了整个列表里对比度最高的元素 ——
+   一个次要指标抢走了「+ 新建」的视觉优先级，而且只有少数行有，斑点感很强。
+   现在改成中性灰底 + 常规灰字，只靠"有/无"传达信号，不靠颜色喊。 */
+/* 徽标里那个 9px 图标已经小到辨认不出画的是什么，纯装饰还拉低了整块的对比度。
+   改成"文字 + 单位"：'读 9 次' 自带图例，不需要用户猜。
+   字色提到 --dim（≥4.5:1），不再是"看不清也看不懂"的灰点。 */
+.hot{display:inline-flex;align-items:center;flex:0 0 auto;
+     font-size:11px;color:var(--dim);font-variant-numeric:tabular-nums;white-space:nowrap;
+     background:var(--panel2);border:1px solid var(--line);padding:0 6px;border-radius:5px}
+.tdoc:hover .hot{color:var(--accent-text);border-color:var(--accent-bar)}
+/* 重要度：稀疏信号，不是每行都有的噪点。
+   演进过程（三次）：
+     v1  画满 5 颗星（★★★★☆）→ 23 行 × 5 颗 = 115 个高饱和符号排成一列，
+         眼睛先看到评分而不是标题。
+     v2  改成"一颗星 + 数字"→ 好一些，但实测库里 96% 的文档是 4 或 5，
+         方差接近零，这一列每行都亮着却不提供任何区分度。
+     v3  只有 5 分显示实心点，4 分及以下留空 —— 但仍给低分画了极淡的点，
+         二元规则被破坏，实测"一半的行都有标记"，等于没有信号。
+     v4（现在）低分**完全不渲染**，只有 5 分显示一个 6px 强调色点，
+         并且紧贴标题右侧。真正最重要的那几篇才冒头。
+   完整数值在行 title 里，鼠标停一下就能看到。 */
+.imp{display:inline-flex;align-items:center;line-height:1;flex:0 0 auto}
+.imp .ic{width:6px;height:6px;flex-basis:6px;stroke-width:0;fill:var(--star-on)}
+/* 卡片/搜索结果里的重要度是行内元数据，用带数字的形态更清楚 */
+.card .imp{gap:3px;color:var(--faint);font-size:12px}
+.card .imp .ic{width:11px;height:11px;flex-basis:11px;fill:currentColor}
+.card .imp.hi{color:var(--star-on);font-weight:600}
+.toolbar{display:flex;gap:8px;align-items:center;margin-bottom:16px;flex-wrap:wrap}
 .toolbar input{flex:1;min-width:200px}
 /* 让输入框/下拉/按钮在同一行等高，否则基线差 1-2px 看着毛躁 */
-.toolbar input,.toolbar select,.toolbar button{height:34px;padding-top:0;padding-bottom:0}
+.toolbar input,.toolbar select,.toolbar button,.toolbar .seg{height:34px;padding-top:0;padding-bottom:0}
+.toolbar .seg button{height:100%}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 .kv{display:grid;grid-template-columns:110px 1fr;gap:8px;align-items:center}
-pre.out{background:var(--pre-bg);color:var(--pre-text);border:1px solid var(--pre-border);border-radius:10px;padding:12px;white-space:pre-wrap;max-height:420px;overflow:auto;font-size:12.5px}
-.toast{position:fixed;right:18px;bottom:18px;background:var(--panel2);border:1px solid var(--line);border-left:3px solid var(--accent2);padding:10px 14px;border-radius:10px;box-shadow:0 8px 30px var(--shadow);z-index:99}
+/* ── 代码块 ──
+   原来三个地方三套样式（裸等宽字/浅色胶囊/深色块），还没有复制按钮 ——
+   MCP 配置页的全部价值就是"给一段能直接粘贴的配置"，让用户手动全选是退化成静态文档。 */
+pre.out{background:var(--pre-bg);color:var(--pre-text);border:1px solid var(--pre-border);border-radius:9px;padding:13px 15px;white-space:pre-wrap;max-height:420px;overflow:auto;font-size:12.5px;line-height:1.65;font-family:'DM Mono',SFMono-Regular,Consolas,'Noto Sans Mono CJK SC',monospace;margin:0}
+/* 空的输出块必须变成"等待输入"的样子，不能留一条 27px 高的深色实心横条 ——
+   那看起来像高度塌陷的 bug 或一条打满的进度条，而实际含义是"还没生成"。
+   :empty 只在完全没有子节点时命中，一有内容立刻恢复深色代码块外观。 */
+pre.out:empty{background:transparent;border-style:dashed;border-color:var(--line-strong);
+              padding:22px 15px;text-align:center}
+/* 文案走 data-empty 属性，每个输出块说自己的事 —— 同步页顶着"点生成后…"
+   等于给了错的指引。没写 data-empty 的退回一句中性文案。 */
+pre.out:empty::before{content:attr(data-empty);
+                      color:var(--faint);font-size:12.5px;
+                      font-family:system-ui,-apple-system,'Noto Sans SC',sans-serif}
+pre.out:empty:not([data-empty])::before{content:'（暂无输出）'}
+.codeblk{margin:8px 0 4px;border:1px solid var(--pre-border);border-radius:9px;overflow:hidden;background:var(--pre-bg)}
+.codeblk pre.out{border:0;border-radius:0;max-height:none}
+/* 代码块标题栏：文件名 + 语言 + 复制。没有它两个深色块长得一模一样，
+   用户必须回头读正文才知道哪块贴进哪个文件。 */
+.codebar{display:flex;align-items:center;gap:8px;padding:6px 8px 6px 13px;
+         background:var(--pre-border);color:var(--pre-text);font-size:11.5px;
+         font-family:'DM Mono',SFMono-Regular,Consolas,monospace}
+.codebar .fn{opacity:.95;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.codebar .lang{margin-left:auto;opacity:.6;letter-spacing:.06em;text-transform:uppercase;font-size:10.5px}
+.codebar button{background:transparent;border:1px solid transparent;color:var(--pre-text);
+                opacity:.75;padding:3px 7px;font-size:11.5px;border-radius:6px}
+.codebar button:hover{opacity:1;background:rgba(255,255,255,.1);border-color:rgba(255,255,255,.18)}
+/* 内联 code：nowrap 防止胶囊底色跨行断成两截（实测 UI 上出现过一次，
+   `program path has no file name` 被硬断，底色断开像渲染 bug）。
+   长路径单独用 .brk 放开换行。 */
+code.key{background:var(--code-bg);color:var(--code-text);border:1px solid var(--code-border);padding:1px 6px;border-radius:6px;font-size:12px;white-space:nowrap;font-family:'DM Mono',SFMono-Regular,Consolas,'Noto Sans Mono CJK SC',monospace}
+/* .brk 是给"必须能换行的长串"（Windows 路径、完整 API Key）用的。
+   但 word-break:break-all 会在任意字符间断开，胶囊底色跟着断成两截 ——
+   实测出现过 "…confi | g.toml" 这种。
+   改 anywhere：断行点仍然自由，但配 box-decoration-break 让底色和圆角在
+   每一段上各自闭合，看起来是两个完整胶囊而不是被切坏的一个。 */
+code.key.brk{white-space:normal;word-break:normal;overflow-wrap:anywhere;
+             -webkit-box-decoration-break:clone;box-decoration-break:clone}
+.toast{position:fixed;right:18px;bottom:18px;background:var(--panel);border:1px solid var(--line-strong);border-left:3px solid var(--accent2);padding:11px 15px;border-radius:9px;box-shadow:0 8px 30px var(--shadow);z-index:99;display:flex;align-items:center;gap:9px;font-size:13px}
 .toast.err{border-left-color:var(--danger)}
+.toast .ic{color:var(--accent2)}
+.toast.err .ic{color:var(--danger)}
 table{width:100%;border-collapse:collapse}
-th,td{text-align:left;padding:8px;border-bottom:1px solid var(--line);font-size:13px}
-th{color:var(--dim);font-weight:500}
-code.key{background:var(--code-bg);color:var(--code-text);border:1px solid var(--code-border);padding:2px 7px;border-radius:7px;font-size:12px;word-break:break-all;font-family:'DM Mono',SFMono-Regular,Consolas,'Noto Sans Mono CJK SC',monospace}
+th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line-soft);font-size:13px}
+th{color:var(--faint);font-weight:600;font-size:11.5px;letter-spacing:.05em;text-transform:uppercase}
+tbody tr:hover{background:var(--hover)}
+tbody tr:last-child td{border-bottom:0}
 </style>
 </head>
 <body>
 
+<!--
+  图标系统：单色线性 SVG sprite，16px 网格 / 1.75 描边 / currentColor。
+  换掉原来的 emoji —— emoji 的问题不是"不好看"，是三条硬伤：
+    1. 不继承颜色。侧栏选中态文字变绿，emoji 还是原色，选中态看起来是半成品。
+    2. 各平台字形不同（Windows/mac/Android 各画一套），宽度也不等，
+       导致图标后面的文字左缘对不齐。
+    3. 颜色、饱和度、细节密度完全不统一，🚀🌿🔑 又艳又碎，🔍☁️ 几乎无色，
+       侧栏会出现一串跟重要性无关的随机亮点。
+  用 sprite 而不是每处内联：同一个图标出现多次时只有一份路径数据。
+-->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+<defs>
+<g id="i-search"><circle cx="7.5" cy="7.5" r="5"/><path d="M11.5 11.5 14.5 14.5"/></g>
+<g id="i-docs"><path d="M4 2.5h6.5l3 3V13a.5.5 0 0 1-.5.5H4a.5.5 0 0 1-.5-.5v-10a.5.5 0 0 1 .5-.5Z"/><path d="M10.5 2.5v3h3"/></g>
+<g id="i-write"><path d="M12 2.8a1.4 1.4 0 0 1 2 2L6.4 12.4l-2.9.9.9-2.9Z"/><path d="M10.6 4.2 12.6 6.2"/></g>
+<g id="i-rocket"><path d="M8 2.2c2.2 1.7 3.4 4 3.4 6.6L8 12 4.6 8.8c0-2.6 1.2-4.9 3.4-6.6Z"/><circle cx="8" cy="7" r="1.4"/><path d="M5.6 11.4 4 14l2.8-1.1M10.4 11.4 12 14l-2.8-1.1"/></g>
+<g id="i-trash"><path d="M3 4.5h10M6.5 4.5V3h3v1.5"/><path d="M4.5 4.5 5 13a.5.5 0 0 0 .5.5h5a.5.5 0 0 0 .5-.5l.5-8.5"/><path d="M6.8 7v4M9.2 7v4"/></g>
+<g id="i-key"><circle cx="5.5" cy="10.5" r="2.6"/><path d="M7.4 8.6 13 3M11 5l1.6 1.6M9.6 6.4 11.2 8"/></g>
+<g id="i-cloud"><path d="M4.6 12.5a2.6 2.6 0 0 1-.3-5.2 3.6 3.6 0 0 1 6.9-1 2.9 2.9 0 0 1 .3 5.7Z"/></g>
+<g id="i-branch"><circle cx="4.5" cy="3.8" r="1.6"/><circle cx="4.5" cy="12.2" r="1.6"/><circle cx="11.5" cy="6.4" r="1.6"/><path d="M4.5 5.4v5.2M6.1 6.4h3.8M9.9 6.4a5 5 0 0 1-5 5"/></g>
+<g id="i-plug"><path d="M6 2.5v3M10 2.5v3"/><path d="M4.2 5.5h7.6v2.2a3.8 3.8 0 0 1-7.6 0Z"/><path d="M8 11.5v2"/></g>
+<g id="i-folder"><path d="M2.5 4.2a.7.7 0 0 1 .7-.7h2.6l1.3 1.5h5.2a.7.7 0 0 1 .7.7v6.6a.7.7 0 0 1-.7.7H3.2a.7.7 0 0 1-.7-.7Z"/></g>
+<g id="i-file"><path d="M4.5 2.5h5l3 3V13a.5.5 0 0 1-.5.5h-7a.5.5 0 0 1-.5-.5v-10a.5.5 0 0 1 .5-.5Z"/><path d="M9.5 2.5v3h3"/></g>
+<g id="i-summary"><path d="M3.5 3.2h9v9.6h-9Z"/><path d="M5.6 6h4.8M5.6 8.3h4.8M5.6 10.6h2.8"/></g>
+<g id="i-scale"><path d="M8 2.6v10.8M4.6 13.4h6.8"/><path d="M2.4 6.2h11.2M4.4 6.2 2.9 9.4h3ZM11.6 6.2 10.1 9.4h3Z"/></g>
+<g id="i-heart"><path d="M8 13S2.8 9.9 2.8 6.4A2.8 2.8 0 0 1 8 5a2.8 2.8 0 0 1 5.2 1.4C13.2 9.9 8 13 8 13Z"/></g>
+<g id="i-wrench"><path d="M9.6 3.2a3 3 0 1 0 3.2 3.2l-2 .6-1.8-1.8Z"/><path d="M9 7 3.6 12.4a1.3 1.3 0 0 0 1.8 1.8L10.8 8.8"/></g>
+<g id="i-book"><path d="M3 3.6a.6.6 0 0 1 .6-.6H7a1.6 1.6 0 0 1 1.6 1.6v8A1.4 1.4 0 0 0 7.2 11H3Z"/><path d="M13 3.6a.6.6 0 0 0-.6-.6H9a1.6 1.6 0 0 0-1.6 1.6v8A1.4 1.4 0 0 1 8.8 11H13Z"/></g>
+<g id="i-bulb"><path d="M8 2.4a3.6 3.6 0 0 1 2.2 6.4c-.4.4-.6.8-.6 1.3H6.4c0-.5-.2-.9-.6-1.3A3.6 3.6 0 0 1 8 2.4Z"/><path d="M6.6 12h2.8M7 13.6h2"/></g>
+<g id="i-sun"><circle cx="8" cy="8" r="3"/><path d="M8 1.6v1.6M8 12.8v1.6M1.6 8h1.6M12.8 8h1.6M3.5 3.5l1.1 1.1M11.4 11.4l1.1 1.1M12.5 3.5l-1.1 1.1M4.6 11.4l-1.1 1.1"/></g>
+<g id="i-moon"><path d="M13 9.6A5.6 5.6 0 0 1 6.4 3a5.6 5.6 0 1 0 6.6 6.6Z"/></g>
+<g id="i-chev"><path d="m6 4 4 4-4 4"/></g>
+<g id="i-copy"><path d="M5.8 5.8h6.4a.6.6 0 0 1 .6.6v6.4a.6.6 0 0 1-.6.6H5.8a.6.6 0 0 1-.6-.6V6.4a.6.6 0 0 1 .6-.6Z"/><path d="M10.2 5.8V3.2a.6.6 0 0 0-.6-.6H3.8a.6.6 0 0 0-.6.6v5.8a.6.6 0 0 0 .6.6h1.4"/></g>
+<g id="i-refresh"><path d="M13 8a5 5 0 1 1-1.6-3.7"/><path d="M13.2 2.6v2.6h-2.6"/></g>
+<g id="i-plus"><path d="M8 3.4v9.2M3.4 8h9.2"/></g>
+<g id="i-back"><path d="M12.6 8H3.8M7 4l-3.4 4L7 12"/></g>
+<g id="i-x"><path d="m4.4 4.4 7.2 7.2M11.6 4.4l-7.2 7.2"/></g>
+<g id="i-check"><path d="m3.4 8.4 3 3 6.2-7"/></g>
+<g id="i-warn"><path d="M8 2.8 14 13H2Z"/><path d="M8 6.6v3M8 11.2v.1"/></g>
+<g id="i-list"><path d="M3 4.4h10M3 8h10M3 11.6h10"/></g>
+<g id="i-grid"><path d="M3 3.4h4.2v4.2H3ZM8.8 3.4H13v4.2H8.8ZM3 9.2h4.2v4.2H3ZM8.8 9.2H13v4.2H8.8Z"/></g>
+<g id="i-history"><path d="M8 4v4l3 1.8"/><circle cx="8" cy="8" r="5.4"/></g>
+<g id="i-logout"><path d="M6 13.5H3.6a.6.6 0 0 1-.6-.6V3.1a.6.6 0 0 1 .6-.6H6"/><path d="M10 4.8 13.2 8 10 11.2M13 8H6.2"/></g>
+<g id="i-star"><path d="M8 1.9 9.9 6l4.5.5-3.3 3.1.9 4.4L8 11.9l-4 2.1.9-4.4L1.6 6.5 6.1 6Z"/></g>
+<!-- 品牌图标：大脑/记忆的隐喻。不用灯泡 —— 灯泡已经给"事实"类型用了，
+     一屏内同一个图标不该承担两个语义。
+     注意这里必须用 HTML 注释，/* */ 在 SVG 里会被当成文本节点渲染出来。 -->
+<g id="i-brain"><path d="M6.6 2.6a2.2 2.2 0 0 1 2.2 2.2v7.4a1.8 1.8 0 0 1-3.4.8"/><path d="M6.6 2.6a2.4 2.4 0 0 0-2.3 3 2.2 2.2 0 0 0-.6 3.6 2 2 0 0 0 1.5 3.4"/><path d="M9.4 2.6a2.2 2.2 0 0 0-2.2 2.2"/><path d="M9.4 2.6a2.4 2.4 0 0 1 2.3 3 2.2 2.2 0 0 1 .6 3.6 2 2 0 0 1-1.5 3.4 1.8 1.8 0 0 1-1.9-1.6"/></g>
+</defs>
+</svg>
+
 <!-- 登录 -->
 <div id="login">
   <button class="ghost icon" id="themebtn2" onclick="toggleTheme()"
-          style="position:fixed;top:16px;right:16px" title="切换主题">🌙</button>
+          style="position:fixed;top:16px;right:16px" title="切换主题"
+          aria-label="切换深浅主题"><svg class="ic"><use href="#i-moon"/></svg></button>
   <div class="card col">
     <h1>memorys</h1>
     <div class="muted" style="margin-bottom:10px">跨会话 AI 知识库 · 复用 ai.xlingo.fun 账号</div>
     <input id="u" placeholder="用户名" autocomplete="username">
     <input id="p" type="password" placeholder="密码" autocomplete="current-password">
-    <button class="primary" onclick="doLogin()">登录</button>
+    <button class="primary" onclick="doLogin()" style="justify-content:center">登录</button>
     <div class="muted" style="font-size:12px">账号密码走 ai.xlingo.fun 校验，本站只存用户标识，不存密码。</div>
     <div id="lerr" class="muted" style="color:var(--danger)"></div>
   </div>
@@ -191,37 +510,42 @@ code.key{background:var(--code-bg);color:var(--code-text);border:1px solid var(-
 <!-- 主界面 -->
 <div id="appview" class="hidden">
   <header>
-    <div class="brand">memory<span>s</span></div>
-    <div class="row">
-      <span class="muted" id="who" title="当前登录账号"></span>
-      <button class="ghost icon" id="themebtn" onclick="toggleTheme()" title="切换主题" aria-label="切换深浅主题">🌙</button>
-      <button class="ghost" onclick="logout()">退出</button>
+    <div class="brand"><svg class="ic lg"><use href="#i-brain"/></svg><span class="wm">memory<span>s</span></span></div>
+    <div class="row" style="gap:6px">
+      <span class="muted" id="who" title="当前登录账号" style="font-size:12.5px"></span>
+      <button class="ghost icon" id="themebtn" onclick="toggleTheme()" title="切换主题" aria-label="切换深浅主题"><svg class="ic"><use href="#i-moon"/></svg></button>
+      <!-- 退出降级成图标按钮：低频且带破坏性的动作不该在右上角最高注意力区用文字占位 -->
+      <button class="ghost icon" onclick="logout()" title="退出登录" aria-label="退出登录"><svg class="ic"><use href="#i-logout"/></svg></button>
     </div>
   </header>
 
   <aside>
     <div class="sec">记忆</div>
-    <div class="navitem on" data-v="search" onclick="nav('search')">🔍 检索</div>
-    <div class="navitem" data-v="list" onclick="nav('list')">📚 全部文档</div>
-    <div class="navitem" data-v="edit" onclick="newDoc()">✏️ 新建记忆</div>
-    <div class="navitem" data-v="bootstrap" onclick="nav('bootstrap')">🚀 上下文引导包</div>
+    <div class="navitem on" data-v="search" onclick="nav('search')"><svg class="ic"><use href="#i-search"/></svg>检索</div>
+    <div class="navitem" data-v="list" onclick="nav('list')"><svg class="ic"><use href="#i-docs"/></svg>全部文档</div>
+    <div class="navitem" data-v="edit" onclick="newDoc()"><svg class="ic"><use href="#i-write"/></svg>新建记忆</div>
+    <div class="navitem" data-v="bootstrap" onclick="nav('bootstrap')"><svg class="ic"><use href="#i-rocket"/></svg>上下文引导包</div>
     <div class="sec">管理</div>
-    <div class="navitem" data-v="trash" onclick="nav('trash')">🗑 回收站</div>
-    <div class="navitem" data-v="keys" onclick="nav('keys')">🔑 API Key</div>
-    <div class="navitem" data-v="sync" onclick="nav('sync')">☁️ 同步 / GitHub</div>
-    <div class="navitem" data-v="branch" onclick="nav('branch')">🌿 分支</div>
+    <div class="navitem" data-v="trash" onclick="nav('trash')"><svg class="ic"><use href="#i-trash"/></svg>回收站</div>
+    <div class="navitem" data-v="keys" onclick="nav('keys')"><svg class="ic"><use href="#i-key"/></svg>API Key</div>
+    <div class="navitem" data-v="sync" onclick="nav('sync')"><svg class="ic"><use href="#i-refresh"/></svg>同步 / GitHub</div>
+    <div class="navitem" data-v="branch" onclick="nav('branch')"><svg class="ic"><use href="#i-branch"/></svg>分支</div>
     <div class="sec">接入</div>
-    <div class="navitem" data-v="mcp" onclick="nav('mcp')">🔌 MCP 配置</div>
+    <div class="navitem" data-v="mcp" onclick="nav('mcp')"><svg class="ic"><use href="#i-plug"/></svg>MCP 配置</div>
     <div class="sec">项目</div>
-    <div id="libs" class="col" style="gap:4px"></div>
+    <div id="libs" class="col" style="gap:2px"></div>
   </aside>
 
   <main>
     <!-- 检索 -->
     <section id="v-search">
-      <div class="toolbar">
-        <input id="q" placeholder="问点什么…（中文可直接问，如「xspeak 怎么发版」）" onkeydown="if(event.key==='Enter')doSearch()">
-        <select id="slib" style="width:150px"><option value="">全部库</option></select>
+      <div class="searchbar">
+        <label class="ifield">
+          <svg class="ic"><use href="#i-search"/></svg>
+          <input id="q" aria-label="检索记忆" placeholder="问点什么…" onkeydown="if(event.key==='Enter')doSearch()">
+          <span class="kbd">Enter</span>
+        </label>
+        <select id="slib" aria-label="限定知识库"><option value="">全部库</option></select>
         <button class="primary" onclick="doSearch()">检索</button>
       </div>
       <div id="sres"></div>
@@ -230,8 +554,11 @@ code.key{background:var(--code-bg);color:var(--code-text);border:1px solid var(-
     <!-- 列表 -->
     <section id="v-list" class="hidden">
       <div class="toolbar">
-        <input id="lq" placeholder="按标题过滤…" onkeydown="if(event.key==='Enter')loadList()">
-        <select id="ltype" style="width:160px" onchange="loadList()">
+        <label class="ifield">
+          <svg class="ic"><use href="#i-search"/></svg>
+          <input id="lq" aria-label="按标题过滤" placeholder="按标题过滤…" onkeydown="if(event.key==='Enter')loadList()">
+        </label>
+        <select id="ltype" style="width:150px" onchange="loadList()" aria-label="按类型筛选">
           <option value="">全部类型</option>
           <option value="project_summary">项目总结</option>
           <option value="decision">决策</option>
@@ -240,17 +567,27 @@ code.key{background:var(--code-bg);color:var(--code-text);border:1px solid var(-
           <option value="glossary">术语</option>
           <option value="fact">事实</option>
         </select>
-        <button id="lmode" onclick="toggleListMode()">📁 文件夹</button>
-        <button onclick="loadList()">刷新</button>
-        <button class="primary" onclick="newDoc()">新建</button>
-      </div>
-      <div class="row" style="margin:-6px 0 12px;gap:8px;flex-wrap:wrap">
-        <span id="pfilter" class="hidden"></span>
-        <span id="treeops" class="row" style="gap:8px">
-          <button class="ghost link" onclick="treeAll(true)">▾ 展开全部</button>
-          <button class="ghost link" onclick="treeAll(false)">▸ 收起全部</button>
+        <!-- 分段控件而不是"切到 X"按钮：能同时看到有哪些视图和现在在哪个 -->
+        <span class="seg" id="lmode" role="group" aria-label="视图模式">
+          <button data-m="tree" onclick="setListMode('tree')" title="按项目分组"><svg class="ic sm"><use href="#i-folder"/></svg>分组</button>
+          <button data-m="flat" onclick="setListMode('flat')" title="平铺卡片"><svg class="ic sm"><use href="#i-grid"/></svg>平铺</button>
         </span>
-        <span class="muted" id="tstat"></span>
+        <button class="ghost icon" onclick="loadList()" title="刷新" aria-label="刷新"><svg class="ic"><use href="#i-refresh"/></svg></button>
+        <button class="primary" onclick="newDoc()"><svg class="ic sm"><use href="#i-plus"/></svg>新建</button>
+      </div>
+      <!-- 操作和统计推到两端：之前它们同色同字号紧挨着，
+           一个是可点的操作、一个是只读的数字，视觉上分不开。
+           max-width 跟 .tdoc 的 760 对齐 —— 否则统计数字的右边缘（880）比
+           下方文档行的时间列多出 120px（实测需 837 才对齐：卡片内边距+缩进），时间列变成一条不跟任何东西对齐的浮动边。 -->
+      <div class="row" style="margin:-6px 0 10px;gap:8px;flex-wrap:wrap;justify-content:space-between;max-width:837px">
+        <span class="row" style="gap:8px">
+          <span id="pfilter" class="hidden"></span>
+          <!-- 展开/收起合成一个 toggle，不再各占一个胶囊按钮 -->
+          <span id="treeops" class="row" style="gap:4px">
+            <button class="link" id="expbtn" onclick="treeToggleAll()">全部收起</button>
+          </span>
+        </span>
+        <span class="muted" id="tstat" style="font-size:12px"></span>
       </div>
       <div id="lres"></div>
     </section>
@@ -258,16 +595,16 @@ code.key{background:var(--code-bg);color:var(--code-text);border:1px solid var(-
     <!-- 编辑 -->
     <section id="v-edit" class="hidden">
       <div class="toolbar">
-        <button class="ghost" onclick="nav('list')">← 返回</button>
-        <span id="etitle" class="muted"></span>
+        <button class="ghost" onclick="nav('list')"><svg class="ic sm"><use href="#i-back"/></svg>返回</button>
+        <span id="etitle" class="muted" style="font-size:12.5px"></span>
         <span style="flex:1"></span>
-        <button id="ehist" class="ghost hidden" onclick="showHistory()">版本历史</button>
-        <button id="edel" class="danger hidden" onclick="delDoc()">删除</button>
-        <span class="muted">保存到</span>
-        <select id="f-branch" style="width:auto;min-width:150px;max-width:260px"></select>
-        <button class="primary" onclick="saveDoc()">保存</button>
+        <button id="ehist" class="ghost hidden" onclick="showHistory()"><svg class="ic sm"><use href="#i-history"/></svg>版本历史</button>
+        <button id="edel" class="danger hidden" onclick="delDoc()"><svg class="ic sm"><use href="#i-trash"/></svg>删除</button>
+        <span class="muted" style="font-size:12.5px">保存到</span>
+        <select id="f-branch" style="width:auto;min-width:140px;max-width:240px" aria-label="保存到分支"></select>
+        <button class="primary" onclick="saveDoc()"><svg class="ic sm"><use href="#i-check"/></svg>保存</button>
       </div>
-      <div class="muted" id="brhint" style="margin:-4px 0 8px"></div>
+      <div class="muted" id="brhint" style="margin:-6px 0 10px;font-size:12.5px"></div>
       <div class="card col">
         <div class="kv"><label>标题</label><input id="f-title" placeholder="例：xspeak 项目架构总结"></div>
         <div class="kv"><label>类型</label>
@@ -298,143 +635,206 @@ code.key{background:var(--code-bg);color:var(--code-text);border:1px solid var(-
     <!-- bootstrap -->
     <section id="v-bootstrap" class="hidden">
       <div class="toolbar">
-        <input id="bproj" placeholder="项目名（留空 = main 库全部）" style="max-width:280px">
-        <input id="bbudget" type="number" value="4000" style="max-width:130px" title="token 预算">
-        <button class="primary" onclick="loadBootstrap()">生成</button>
-        <button class="ghost" onclick="copyBootstrap()">复制</button>
+        <input id="bproj" placeholder="项目名（留空 = main 库全部）" style="max-width:280px" aria-label="项目名">
+        <!-- 数值输入框一旦有默认值，placeholder 就永远不显示 —— 没有可见标签时
+             用户和读屏软件都不知道 4000 是什么。前缀文字比 title 可靠。 -->
+        <label class="row" style="gap:6px;flex:0 0 auto">
+          <span class="muted" style="font-size:12.5px">预算</span>
+          <input id="bbudget" type="number" value="4000" style="max-width:96px" aria-label="token 预算">
+          <span class="muted" style="font-size:12.5px">tokens</span>
+        </label>
+        <button class="primary" onclick="loadBootstrap()"><svg class="ic sm"><use href="#i-rocket"/></svg>生成</button>
+        <!-- 生成前禁用：空状态暴露出这个按钮一直可点，但点了没内容可复制 -->
+        <button class="ghost" id="bcopy" onclick="copyBootstrap()" disabled><svg class="ic sm"><use href="#i-copy"/></svg>复制</button>
       </div>
-      <div class="muted" style="margin-bottom:10px">换模型/换 agent 时，把这段塞进新会话开场，即可恢复上下文。</div>
+      <div class="muted" style="margin-bottom:12px;font-size:13px;max-width:64ch">换模型/换 agent 时，把这段塞进新会话开场，即可恢复上下文。</div>
       <div id="bmeta"></div>
-      <pre class="out" id="bout"></pre>
+      <pre class="out" id="bout" data-empty="点「生成」后，这里会出现可直接粘进新会话的上下文包"></pre>
     </section>
 
     <!-- 回收站 -->
     <section id="v-trash" class="hidden">
-      <div class="toolbar"><button onclick="loadTrash()">刷新</button><span class="muted">删除是软删除，md 文件移到 .trash 且 git 有记录，可恢复。</span></div>
+      <div class="toolbar">
+        <button class="ghost icon" onclick="loadTrash()" title="刷新" aria-label="刷新"><svg class="ic"><use href="#i-refresh"/></svg></button>
+        <span class="muted" style="font-size:12.5px">删除是软删除，md 文件移到 .trash 且 git 有记录，可恢复。</span>
+      </div>
       <div id="tres"></div>
     </section>
 
     <!-- API Key -->
     <section id="v-keys" class="hidden">
       <div class="toolbar">
-        <input id="kname" placeholder="Key 名称，如 claude-desktop" style="max-width:260px">
-        <button class="primary" onclick="createKey()">创建 Key</button>
+        <input id="kname" placeholder="Key 名称，如 claude-desktop" style="max-width:260px" aria-label="Key 名称">
+        <button class="primary" onclick="createKey()"><svg class="ic sm"><use href="#i-plus"/></svg>创建 Key</button>
       </div>
       <div id="knew"></div>
-      <div class="card"><table><thead><tr><th>名称</th><th>前缀</th><th>创建</th><th>最近使用</th><th></th></tr></thead><tbody id="kbody"></tbody></table></div>
+      <div class="card" style="padding:6px 8px"><table><thead><tr><th>名称</th><th>前缀</th><th>创建</th><th>最近使用</th><th></th></tr></thead><tbody id="kbody"></tbody></table></div>
     </section>
 
     <!-- 同步 -->
     <section id="v-sync" class="hidden">
       <div class="card col">
-        <h3>磁盘 → 数据库 重建索引</h3>
-        <div class="muted">直接改过 md 文件、或从别处 git pull 之后，用这个重建检索索引。</div>
+        <h3 class="ih"><svg class="ic"><use href="#i-refresh"/></svg>磁盘 → 数据库 重建索引</h3>
+        <div class="muted" style="font-size:13px;max-width:64ch">直接改过 md 文件、或从别处 git pull 之后，用这个重建检索索引。已有向量会按内容复用，不重新调上游。</div>
         <div class="row"><button class="primary" onclick="doSync('reindex')">重建索引</button>
         <button onclick="doSync('pull')">git pull 后重建</button></div>
       </div>
       <div class="card col">
-        <h3>推送到 GitHub（长期备份）</h3>
-        <div class="muted">需先在服务器 .env 配置 GITHUB_REMOTE（git@github.com:xxx/xxx.git）。</div>
-        <button class="primary" onclick="doPush()">立即推送</button>
+        <h3 class="ih"><svg class="ic"><use href="#i-cloud"/></svg>推送到 GitHub（长期备份）</h3>
+        <div class="muted" style="font-size:13px;max-width:64ch">需先在服务器 .env 配置 <code class="key">MEM_GITHUB_REMOTE</code>。</div>
+        <div class="row"><button class="primary" onclick="doPush()">立即推送</button></div>
       </div>
       <div class="card col">
-        <h3>定时推送</h3>
-        <div id="pushsched" class="muted">读取中…</div>
+        <h3 class="ih"><svg class="ic"><use href="#i-history"/></svg>定时推送</h3>
+        <div id="pushsched" class="muted" style="font-size:13px;max-width:64ch">读取中…</div>
       </div>
-      <pre class="out" id="syncout"></pre>
+      <pre class="out" id="syncout" data-empty="执行上面任一操作后，这里显示结果与耗时"></pre>
     </section>
 
     <!-- 分支 -->
     <section id="v-branch" class="hidden">
       <div class="card col">
-        <h3>当前分支</h3>
+        <h3 class="ih"><svg class="ic"><use href="#i-branch"/></svg>当前分支</h3>
         <div class="row" style="align-items:center;flex-wrap:wrap;gap:10px">
-          <select id="brsel" style="width:auto;min-width:170px;max-width:340px"></select>
-          <span class="muted" id="dirtyflag"></span>
+          <select id="brsel" style="width:auto;min-width:170px;max-width:340px" aria-label="切换分支"></select>
+          <span class="muted" id="dirtyflag" style="font-size:12.5px"></span>
         </div>
-        <div class="muted">
+        <div class="muted" style="font-size:13px;max-width:64ch">
           直接下拉切换分支。想大改记忆又怕搞乱主线，就开个分支改，满意了再合回来，不想要就删掉。
           切换和合并<b>会改变磁盘上的 md 文件</b>，之后需要重建索引 —— 这一步已经自动带上了。
         </div>
       </div>
 
       <div class="card col">
-        <h3>新建分支</h3>
+        <h3 class="ih"><svg class="ic"><use href="#i-plus"/></svg>新建分支</h3>
         <div class="row">
-          <input id="nbname" placeholder="分支名，如 refactor-xspeak" style="flex:1">
+          <input id="nbname" placeholder="分支名，如 refactor-xspeak" style="flex:1;max-width:340px" aria-label="新分支名">
           <button class="primary" onclick="branchCreate()">创建并切换</button>
         </div>
-        <div class="muted">
+        <div class="muted" style="font-size:13px;max-width:64ch">
           从当前分支的最新状态开叉，未提交的改动会先自动提交，不会丢。
           分支名只能用字母数字和 <code class="key">. _ - /</code>，需以字母数字开头。
         </div>
       </div>
 
       <div class="card col">
-        <h3>合并分支</h3>
+        <h3 class="ih"><svg class="ic"><use href="#i-check"/></svg>合并分支</h3>
         <div class="row" style="align-items:center;flex-wrap:wrap;gap:8px">
-          <select id="mgsel" style="width:auto;min-width:170px;max-width:340px"></select>
-          <span class="muted">合并进</span>
+          <select id="mgsel" style="width:auto;min-width:170px;max-width:340px" aria-label="要合并的分支"></select>
+          <span class="muted" style="font-size:12.5px">合并进</span>
           <code class="key" id="mgtarget">…</code>
           <button class="primary" onclick="mergeSelected()">合并</button>
         </div>
-        <div class="muted">有冲突会自动回滚，不会留下半成品。</div>
+        <div class="muted" style="font-size:13px">有冲突会自动回滚，不会留下半成品。</div>
       </div>
 
       <div class="card col">
-        <h3>分支列表</h3>
-        <div class="muted">按最后提交时间排序。当前分支标 ●</div>
+        <h3 class="ih"><svg class="ic"><use href="#i-list"/></svg>分支列表</h3>
+        <div class="muted" style="font-size:12.5px">按最后提交时间排序。</div>
         <div id="branchlist"></div>
       </div>
 
-      <pre class="out" id="brout"></pre>
+      <pre class="out" id="brout" data-empty="切换或创建分支后，这里显示 git 输出"></pre>
     </section>
 
     <!-- MCP -->
     <section id="v-mcp" class="hidden">
-      <div class="card col">
-        <h3>把知识库挂到 AI agent</h3>
-        <div class="muted">先在「API Key」页创建一个 Key，然后按下面配置。10 个工具：memory_search / memory_get / memory_write / memory_update / memory_delete / memory_restore / memory_bootstrap / memory_list_libraries / memory_list_docs / memory_history。</div>
-        <div class="muted" style="margin-top:10px">
-          这是<b>远程 HTTP 服务</b>（一直在服务器上跑），不是本地程序。所以配置里只需要 URL，
-          <b>不要写 <code class="key">command</code></b>。写了会让客户端按"启动本地进程"处理，
-          报 <code class="key">program path has no file name</code>。
+      <div class="card">
+        <h3 class="ih"><svg class="ic"><use href="#i-plug"/></svg>把知识库挂到 AI agent</h3>
+        <div class="prose col" style="gap:12px">
+          <div class="muted" style="font-size:13px">
+            下面的配置已经自动填好你的 Key 和地址，点复制直接粘贴即可。
+            没有 Key 就先去<a href="#" onclick="nav('keys');return false">「API Key」</a>页建一个。
+          </div>
+          <div class="muted" style="font-size:13px">
+            这是<b>远程 HTTP 服务</b>（一直在服务器上跑），不是本地程序。所以配置里只需要 URL，
+            <b>不要写 <code class="key">command</code></b> —— 写了会让客户端按"启动本地进程"处理，
+            报 <code class="key">program path has no file name</code>。
+          </div>
         </div>
 
-        <div class="muted" style="margin-top:14px"><b>Codex CLI</b> — 只认 TOML，改 <code class="key">~/.codex/config.toml</code>（Windows：<code class="key">C:\Users\你的用户名\.codex\config.toml</code>）：</div>
-        <pre class="out" id="mcptoml"></pre>
-        <div class="muted">
-          <code class="key">http_headers</code> 必须是独立的一段，不能内联进上面那段。
+        <div class="prose" style="margin-top:6px">
+          <div class="muted" style="font-size:13px;margin-bottom:2px"><b>Codex CLI</b> 只认 TOML，不读 <code class="key">.mcp.json</code>（实测各种开关都不行）。</div>
+        </div>
+        <div class="codeblk">
+          <div class="codebar">
+            <span class="fn">~/.codex/config.toml</span>
+            <span class="lang">toml</span>
+            <button onclick="copyCode('mcptoml')" title="复制"><svg class="ic sm"><use href="#i-copy"/></svg>复制</button>
+          </div>
+          <pre class="out" id="mcptoml"></pre>
+        </div>
+        <div class="prose muted" style="font-size:12.5px;margin-bottom:16px">
+          <code class="key">http_headers</code> 必须是独立的一段，不能内联。
           验证：<code class="key">codex mcp get memorys</code> 应显示 <code class="key">transport: streamable_http</code>。
-          Codex 不读 <code class="key">.mcp.json</code>（实测过，各种开关都不行）。
+          Windows 配置在 <code class="key brk">C:\Users\你的用户名\.codex\config.toml</code>。
         </div>
 
-        <div class="muted" style="margin-top:14px"><b>Claude Desktop / Cursor / VS Code</b> — 用 JSON：</div>
-        <pre class="out" id="mcpcfg"></pre>
-        <div class="muted">
-          放这里：Claude Desktop <code class="key">%APPDATA%\Claude\claude_desktop_config.json</code>；
-          Cursor <code class="key">.cursor/mcp.json</code>；VS Code <code class="key">.vscode/mcp.json</code>。
+        <div class="prose">
+          <div class="muted" style="font-size:13px;margin-bottom:2px"><b>Claude Desktop / Cursor / VS Code</b> 用 JSON。</div>
+        </div>
+        <div class="codeblk">
+          <div class="codebar">
+            <span class="fn">claude_desktop_config.json · .cursor/mcp.json · .vscode/mcp.json</span>
+            <span class="lang">json</span>
+            <button onclick="copyCode('mcpcfg')" title="复制"><svg class="ic sm"><use href="#i-copy"/></svg>复制</button>
+          </div>
+          <pre class="out" id="mcpcfg"></pre>
+        </div>
+        <div class="prose muted" style="font-size:12.5px;margin-bottom:16px">
+          Claude Desktop 在 <code class="key brk">%APPDATA%\Claude\claude_desktop_config.json</code>；
+          Cursor 在项目里的 <code class="key">.cursor/mcp.json</code>；VS Code 在 <code class="key">.vscode/mcp.json</code>。
         </div>
 
-        <div class="muted" style="margin-top:14px"><b>Hermes</b> — 用 CLI 写，别手改 config.yaml：</div>
-        <pre class="out" id="mcphermes"></pre>
-
-        <div class="muted" style="margin-top:14px">
-          手工验证端点（URL 尾斜杠可有可无，两种都通）：
+        <div class="prose">
+          <div class="muted" style="font-size:13px;margin-bottom:2px"><b>Hermes</b> 用 CLI 写，别手改 config.yaml。</div>
         </div>
-        <pre class="out" id="mcpcurl"></pre>
-        <div class="muted">
-          认证只认 <code class="key">X-Api-Key</code>。用 <code class="key">Authorization: Bearer &lt;api key&gt;</code> 会 401
-          —— Bearer 那条通道是给网页登录的 JWT 用的。
+        <div class="codeblk">
+          <div class="codebar">
+            <span class="fn">终端执行</span>
+            <span class="lang">bash</span>
+            <button onclick="copyCode('mcphermes')" title="复制"><svg class="ic sm"><use href="#i-copy"/></svg>复制</button>
+          </div>
+          <pre class="out" id="mcphermes"></pre>
+        </div>
+
+        <div class="prose">
+          <div class="muted" style="font-size:13px;margin:16px 0 2px">手工验证端点（URL 尾斜杠可有可无，两种都通）。</div>
+        </div>
+        <div class="codeblk">
+          <div class="codebar">
+            <span class="fn">验证连通性</span>
+            <span class="lang">bash</span>
+            <button onclick="copyCode('mcpcurl')" title="复制"><svg class="ic sm"><use href="#i-copy"/></svg>复制</button>
+          </div>
+          <pre class="out" id="mcpcurl"></pre>
+        </div>
+        <div class="prose muted" style="font-size:12.5px;margin-top:8px">
+          认证只认 <code class="key">X-Api-Key</code>。用 <code class="key">Authorization: Bearer</code> 会 401
+          —— 那条通道是给网页登录的 JWT 用的。
+        </div>
+
+        <div class="prose" style="margin-top:18px">
+          <div class="muted" style="font-size:13px;margin-bottom:6px"><b>10 个工具</b></div>
+          <div class="row" style="flex-wrap:wrap;gap:5px">
+            <code class="key">memory_search</code><code class="key">memory_get</code><code class="key">memory_write</code
+            ><code class="key">memory_update</code><code class="key">memory_delete</code><code class="key">memory_restore</code
+            ><code class="key">memory_bootstrap</code><code class="key">memory_list_libraries</code
+            ><code class="key">memory_list_docs</code><code class="key">memory_history</code>
+          </div>
         </div>
       </div>
-      <div class="card col">
-        <h3>REST API</h3>
-        <div class="muted">交互式文档：<a href="/api/docs" target="_blank" id="docslink">/api/docs</a></div>
-        <pre class="out">curl -H "X-Api-Key: mk_***" "BASE/api/v1/search?q=xspeak"
-curl -H "X-Api-Key: mk_***" "BASE/api/v1/bootstrap?project=xspeak&token_budget=4000"
-curl -X POST -H "X-Api-Key: mk_***" -H "Content-Type: application/json" \
-  -d '{"title":"标题","type":"fact","content":"正文","project":"xspeak"}' BASE/api/v1/documents</pre>
+      <div class="card">
+        <h3 class="ih"><svg class="ic"><use href="#i-docs"/></svg>REST API</h3>
+        <div class="muted" style="font-size:13px;margin-bottom:8px">交互式文档：<a href="/api/docs" target="_blank" id="docslink">/api/docs</a></div>
+        <div class="codeblk">
+          <div class="codebar">
+            <span class="fn">常用调用</span>
+            <span class="lang">bash</span>
+            <button onclick="copyCode('restcurl')" title="复制"><svg class="ic sm"><use href="#i-copy"/></svg>复制</button>
+          </div>
+          <pre class="out" id="restcurl"></pre>
+        </div>
       </div>
     </section>
   </main>
@@ -456,17 +856,37 @@ function toggleTheme(){
 }
 function syncThemeBtn(){
   const dark = document.documentElement.getAttribute('data-theme') === 'dark';
-  // 登录页和主界面各有一个按钮，两个都要同步
+  // 登录页和主界面各有一个按钮，两个都要同步。
+  // 换成 SVG 后不能再改 textContent —— 那会把 <svg> 整个删掉，按钮变空白。
   document.querySelectorAll('#themebtn,#themebtn2').forEach(b=>{
-    b.textContent = dark ? '☀️' : '🌙';
+    const u = b.querySelector('use');
+    if(u) u.setAttribute('href', dark ? '#i-sun' : '#i-moon');
     b.title = dark ? '切到亮色' : '切到暗色';
   });
 }
 syncThemeBtn();
 
+/* toast 带图标：成功/失败一眼能分，不用读文案 */
 function toast(msg, err){
-  const d=document.createElement('div'); d.className='toast'+(err?' err':''); d.textContent=msg;
+  const d=document.createElement('div'); d.className='toast'+(err?' err':'');
+  d.innerHTML = `<svg class="ic"><use href="#i-${err?'warn':'check'}"/></svg><span></span>`;
+  d.lastChild.textContent = msg;
   document.body.appendChild(d); setTimeout(()=>d.remove(), 2600);
+}
+
+/* 复制代码块。navigator.clipboard 在非 HTTPS 下不存在，退回 textarea+execCommand。 */
+async function copyCode(id){
+  const t = ($('#'+id)||{}).textContent || '';
+  if(!t) return;
+  try{
+    if(navigator.clipboard && window.isSecureContext) await navigator.clipboard.writeText(t);
+    else{
+      const ta=document.createElement('textarea'); ta.value=t;
+      ta.style.cssText='position:fixed;opacity:0'; document.body.appendChild(ta);
+      ta.select(); document.execCommand('copy'); ta.remove();
+    }
+    toast('已复制');
+  }catch(e){ toast('复制失败，请手动选中', 1); }
 }
 /* 站点前缀：直接挂域名根时为 ''，挂在 utils.xlingo.fun/mem/ 这类子路径时自动得到 '/mem'。
    nginx 反代已把 /mem/ 前缀 strip 掉，所以前端必须自己加回来，否则请求会打到宿主站。 */
@@ -506,40 +926,67 @@ async function boot(){
   try{
     const me = await api('/api/v1/auth/me');
     S.user=me;
-    $('#who').textContent = (me.displayName||me.username)+' · '+me.username;
+    // displayName 和 username 相同时不要重复显示（原来一律拼成 "xiao · xiao"，
+    // 看起来像"组织 · 用户"两级，实际是同一个值）
+    const dn = me.displayName || me.username;
+    $('#who').textContent = (dn && dn !== me.username) ? dn+' · '+me.username : (dn || me.username);
+    $('#who').title = '登录账号 '+me.username;
     $('#login').classList.add('hidden'); $('#appview').classList.remove('hidden');
-    const MCPURL = location.origin + BASE + '/mcp';
-    const KEYPH = 'hk_把你的key粘到这里';
-    // Codex：TOML，且 http_headers 必须是独立段。绝对不能出现 command。
-    $('#mcptoml').textContent =
-      '[mcp_servers.memorys]\n' +
-      'url = "' + MCPURL + '"\n\n' +
-      '[mcp_servers.memorys.http_headers]\n' +
-      'X-Api-Key = "' + KEYPH + '"';
-    // Claude Desktop / Cursor / VS Code：JSON
-    $('#mcpcfg').textContent = JSON.stringify(
-      {mcpServers:{memorys:{type:"http",url:MCPURL,headers:{"X-Api-Key":KEYPH}}}}, null, 2);
-    // Hermes：走 CLI
-    $('#mcphermes').textContent =
-      'hermes config set mcp_servers.memorys.url ' + MCPURL + '\n' +
-      'hermes config set mcp_servers.memorys.headers.X-Api-Key ' + KEYPH + '\n' +
-      'hermes config set mcp_servers.memorys.timeout 120\n' +
-      'hermes mcp test memorys';
-    $('#mcpcurl').textContent =
-      "curl -X POST '" + MCPURL + "' \\\n" +
-      "  -H 'X-Api-Key: " + KEYPH + "' \\\n" +
-      "  -H 'Content-Type: application/json' \\\n" +
-      "  -H 'Accept: application/json, text/event-stream' \\\n" +
-      '  -d \'{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}\'';
-    // 注意要带上 BASE 前缀：挂在 /mem 子路径时 location.origin 不含前缀，
-    // 直接替换会给出打不通的 curl 示例。
-    // 只替换 REST 示例那块：上面几块是 JS 动态生成的，已经带好了完整 URL，
-    // 再扫一遍虽然当前无害，但以后示例里出现 BASE 字样就会被误替换。
-    const ROOT = location.origin + BASE;
-    $('#v-mcp').querySelectorAll('pre.out:not([id])').forEach(p=>p.textContent=p.textContent.replaceAll('BASE',ROOT));
+    renderMcp();
     const dl = $('#docslink'); if(dl){ dl.href = BASE + '/api/docs'; dl.textContent = BASE + '/api/docs'; }
     await loadLibs(); nav('search');
   }catch(e){ logout(); }
+}
+
+/* MCP 配置页：把真实 Key 填进去。
+   原来写死占位符 hk_把你的key粘到这里，用户得手动替换 —— 这个页面的全部价值
+   就是"给一段能直接粘贴的配置"，留占位符等于退化成静态文档。
+   拿不到 Key（一个都没建过）时才退回占位符，并提示去建。 */
+async function renderMcp(){
+  const MCPURL = location.origin + BASE + '/mcp';
+  let key = null;
+  try{
+    // 注意 /api/v1/keys 直接返回数组，不是 {items:[]}
+    const ks = await api('/api/v1/keys');
+    const live = (Array.isArray(ks) ? ks : (ks.items||[])).filter(k=>!k.revokedAt);
+    // 后端只存哈希，明文取不回来。创建时缓存过明文就直接用；
+    // 否则给 prefix + 提示，至少让用户知道该用哪个 Key，而不是一句占位符。
+    const cached = localStorage.getItem('mem_lastkey') || '';
+    if(cached && live.some(k=>cached.startsWith(k.prefix))) key = cached;
+    else if(live.length) key = live[0].prefix + '…把完整 Key 粘到这里';
+  }catch(e){}
+  const K = key || 'hk_先去「API Key」页创建一个';
+  const el = id => $('#'+id);
+  // Codex：TOML，且 http_headers 必须是独立段。绝对不能出现 command。
+  el('mcptoml').textContent =
+    '[mcp_servers.memorys]\n' +
+    'url = "' + MCPURL + '"\n\n' +
+    '[mcp_servers.memorys.http_headers]\n' +
+    'X-Api-Key = "' + K + '"';
+  // Claude Desktop / Cursor / VS Code：JSON
+  el('mcpcfg').textContent = JSON.stringify(
+    {mcpServers:{memorys:{type:"http",url:MCPURL,headers:{"X-Api-Key":K}}}}, null, 2);
+  // Hermes：走 CLI
+  el('mcphermes').textContent =
+    'hermes config set mcp_servers.memorys.url ' + MCPURL + '\n' +
+    'hermes config set mcp_servers.memorys.headers.X-Api-Key ' + K + '\n' +
+    'hermes config set mcp_servers.memorys.timeout 120\n' +
+    'hermes mcp test memorys';
+  el('mcpcurl').textContent =
+    "curl -X POST '" + MCPURL + "' \\\n" +
+    "  -H 'X-Api-Key: " + K + "' \\\n" +
+    "  -H 'Content-Type: application/json' \\\n" +
+    "  -H 'Accept: application/json, text/event-stream' \\\n" +
+    '  -d \'{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}\'';
+  // REST 示例。带上 BASE 前缀 —— 挂在 /mem 子路径时 location.origin 不含前缀，
+  // 少了它给出的就是打不通的 curl。
+  const ROOT = location.origin + BASE;
+  el('restcurl').textContent =
+    'curl -H "X-Api-Key: ' + K + '" "' + ROOT + '/api/v1/search?q=xspeak"\n' +
+    'curl -H "X-Api-Key: ' + K + '" "' + ROOT + '/api/v1/bootstrap?project=xspeak&token_budget=4000"\n' +
+    'curl -X POST -H "X-Api-Key: ' + K + '" -H "Content-Type: application/json" \\\n' +
+    '  -d \'{"title":"标题","type":"fact","content":"正文","project":"xspeak"}\' \\\n' +
+    '  ' + ROOT + '/api/v1/documents';
 }
 
 /* 导航 */
@@ -548,11 +995,13 @@ function nav(v){
     $('#v-'+x).classList.toggle('hidden', x!==v);
   });
   document.querySelectorAll('.navitem').forEach(n=>n.classList.toggle('on', n.dataset.v===v));
+  if(v==='search' && !$('#sres').innerHTML.trim()) searchIdle();
   if(v==='list') loadList();
   if(v==='trash') loadTrash();
   if(v==='keys') loadKeys();
   if(v==='branch') loadBranches();
   if(v==='sync') loadSchedule();
+  if(v==='mcp') renderMcp();   // Key 可能刚建，重进这页要刷新配置里的值
 }
 
 /* 侧栏列项目（不是库）。库实际上基本只有 main，列项目才有导航价值。
@@ -567,10 +1016,14 @@ async function loadLibs(){
       if(b==='（未归项目）') return -1;
       return cnt[b]-cnt[a] || a.localeCompare(b);
     });
+    // 检索页的示例问句要用真实项目名，所以在这里存一份
+    S.projList = projs.filter(p=>p!=='（未归项目）');
+    S.docTotal = d.items.length;
     $('#libs').innerHTML = projs.length
-      ? projs.map(p=>`<div class="navitem" data-proj="${encodeURIComponent(p)}">`
-          + `📁 ${H(p)} <span class="tcount">${cnt[p]} 篇</span></div>`).join('')
-      : '<div class="muted" style="font-size:12px">还没有记忆</div>';
+      ? projs.map(p=>`<div class="navitem" data-proj="${encodeURIComponent(p)}" title="${H(p)}">`
+          + `<svg class="ic sm"><use href="#i-folder"/></svg>`
+          + `<span class="nm">${H(p)}</span><span class="tcount">${cnt[p]} 篇</span></div>`).join('')
+      : '<div class="muted" style="font-size:12px;padding:4px 9px">还没有记忆</div>';
     const libs = [...new Set(d.items.map(i=>i.library))];
     $('#slib').innerHTML = '<option value="">全部库</option>'+libs.map(l=>`<option>${H(l)}</option>`).join('');
   }catch(e){}
@@ -593,21 +1046,61 @@ function clearProj(){ loadList(undefined, ''); }
 function filterLib(l){ nav('list'); $('#lq').value=''; loadList(l); }
 
 /* 检索 */
+/* 首屏空状态：原来这里是纯背景色，72% 的屏幕不给任何信息，
+   而且"还没搜""在搜""搜不到"三种情况长得一样。
+   示例问句用库里真实的项目名生成，点一下直接搜。 */
+function searchIdle(){
+  const projs = (S.projList||[]).slice(0,2);
+  const stat = S.docTotal
+    ? `${S.docTotal} 篇记忆 · ${(S.projList||[]).length} 个项目`
+    : '';
+  // 示例要覆盖不同的提问类型，展示能力边界。
+  // 原来三条全是"X 怎么部署"，同质化浪费了唯一的展示机会。
+  const ex = [];
+  if(projs[0]) ex.push(projs[0]+' 怎么部署');
+  ex.push('数据存在哪里');
+  if(projs[1]) ex.push('为什么选了 '+projs[1]);
+  ex.push('上次那个报错怎么解决的');
+  const chips = ex.map(q=>`<span class="chip" data-q="${H(q)}">`
+    + `<svg class="ic"><use href="#i-search"/></svg>${H(q)}</span>`).join('');
+  $('#sres').innerHTML = `<div class="empty">
+    <h4>问一句话，把记忆找回来</h4>
+    <p>中文直接问就行，不用拆关键词。命中的是文档里的<b>那一节</b>，不是整篇 ——
+       塞进上下文时不浪费 token。</p>
+    <div class="chips">${chips}</div>
+    ${stat?`<div class="muted" style="margin-top:24px;font-size:12px">${H(stat)}</div>`:''}
+  </div>`;
+  $('#sres').querySelectorAll('.chip').forEach(c=>c.onclick=()=>{
+    $('#q').value = c.dataset.q; doSearch();
+  });
+}
+
 async function doSearch(){
-  const q=$('#q').value.trim(); if(!q) return;
-  $('#sres').innerHTML='<div class="muted">检索中…</div>';
+  const q=$('#q').value.trim();
+  if(!q){ searchIdle(); return; }
+  // 骨架屏而不是"检索中…"文字：让加载态和空结果态在视觉上分得开
+  $('#sres').innerHTML = '<div class="skel"></div><div class="skel"></div><div class="skel"></div>';
   try{
     const lib=$('#slib').value;
     const d = await api('/api/v1/search?q='+encodeURIComponent(q)+'&limit=12'+(lib?'&library='+encodeURIComponent(lib):''));
-    if(!d.results.length){ $('#sres').innerHTML='<div class="card muted">没有命中。换个说法，或先去「全部文档」看看库里有什么。</div>'; return; }
-    $('#sres').innerHTML = `<div class="muted" style="margin-bottom:10px">模式 ${d.mode} · ${d.results.length} 条</div>`+
+    if(!d.results.length){
+      $('#sres').innerHTML = `<div class="empty">
+        <svg class="ic"><use href="#i-search"/></svg>
+        <h4>没有命中</h4>
+        <p>换个说法试试，或者去<a href="#" onclick="nav('list');return false">「全部文档」</a>看看库里现在有什么。</p>
+      </div>`;
+      return;
+    }
+    $('#sres').innerHTML = `<div class="muted" style="margin-bottom:10px;font-size:12.5px">${d.results.length} 条 · ${H(d.mode)} 融合</div>`+
       d.results.map(r=>`<div class="card doc" onclick="openDoc(${r.doc.id})">
-        <h3>${H(r.doc.title)} <span class="badge">${H(r.doc.type)}</span> <span class="badge">score ${r.score}</span></h3>
-        <div class="muted" style="font-size:12px;margin-bottom:8px">
-          ${r.doc.project?'项目 '+H(r.doc.project)+' · ':''}库 ${H(r.doc.library)} · 重要度 ${r.doc.importance}
-          ${(r.doc.tags||[]).map(t=>' <span class="tag">'+H(t)+'</span>').join('')}
+        <h3>${H(r.doc.title)}</h3>
+        <div class="muted" style="font-size:12px;margin-bottom:9px;display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+          <span class="badge">${H(TYPE_LABEL[r.doc.type]||r.doc.type)}</span>
+          ${r.doc.project?'<span>'+H(r.doc.project)+'</span><span style="opacity:.4">·</span>':''}
+          ${r.heading?'<span>'+H(r.heading)+'</span><span style="opacity:.4">·</span>':''}
+          <span class="imp${r.doc.importance>=4?' hi':''}"><svg class="ic"><use href="#i-star"/></svg>${r.doc.importance}</span>
+          ${(r.doc.tags||[]).map(t=>'<span class="tag">'+H(t)+'</span>').join('')}
         </div>
-        ${r.heading?`<div class="muted" style="font-size:12px">章节：${H(r.heading)}</div>`:''}
         <div class="snippet">${H(r.content.slice(0,400))}</div>
       </div>`).join('');
   }catch(e){ toast(e.message,1); $('#sres').innerHTML=''; }
@@ -618,15 +1111,27 @@ async function doSearch(){
    记在 localStorage 里，刷新后保持上次的选择。 */
 const TYPE_LABEL = {project_summary:'项目总结', decision:'决策', preference:'偏好',
                     howto:'操作步骤', glossary:'术语', fact:'事实'};
-const TYPE_ICON = {project_summary:'📋', decision:'⚖️', preference:'❤️',
-                   howto:'🔧', glossary:'📖', fact:'💡'};
+/* 类型图标：sprite id。emoji 换掉了 —— 那一组（📋⚖️❤️🔧📖💡）里
+   ❤️ 的饱和度和视觉重量远超其他几个，扫列表时会莫名被"偏好"吸住注意力。 */
+const TYPE_ICON = {project_summary:'i-summary', decision:'i-scale', preference:'i-heart',
+                   howto:'i-wrench', glossary:'i-book', fact:'i-bulb'};
 // 类型的展示顺序：按"回看时的重要程度"排，不用字母序
 const TYPE_ORDER = ['project_summary','decision','preference','howto','glossary','fact'];
 
-function toggleListMode(){
-  S.listMode = S.listMode === 'tree' ? 'flat' : 'tree';
-  localStorage.setItem('mem_listmode', S.listMode);
+function setListMode(m){
+  if(S.listMode === m) return;
+  S.listMode = m;
+  localStorage.setItem('mem_listmode', m);
   loadList(S.lastLib);
+}
+
+/* 展开/收起合成一个 toggle：原来两个胶囊按钮常驻一整行，
+   而这两个动作互斥，同时给两个入口没有意义。 */
+function treeToggleAll(){
+  const open = S.treeOpen || (S.treeOpen = {});
+  const anyOpen = Object.values(open).some(v=>v);
+  for(const k of Object.keys(open)) open[k] = !anyOpen;
+  renderTree(S.docs || []);
 }
 
 async function loadList(lib, proj){
@@ -639,20 +1144,27 @@ async function loadList(lib, proj){
   if(lib) url+='&library='+encodeURIComponent(lib);
   if(S.projFilter) url+='&project='+encodeURIComponent(S.projFilter);
   const tree = S.listMode !== 'flat';
-  // 按钮显示"点了会切到什么"，加个箭头避免被误读成"当前是什么"
-  $('#lmode').textContent = tree ? '切到 📄 平铺' : '切到 📁 文件夹';
+  // 分段控件：高亮当前视图，而不是显示"点了会切到什么"
+  $('#lmode').querySelectorAll('button').forEach(b=>
+    b.classList.toggle('on', b.dataset.m === (tree?'tree':'flat')));
   $('#treeops').classList.toggle('hidden', !tree);
   // 有项目过滤时给个可点掉的标记，否则用户会困在某个项目里找不到出口
   const pf = $('#pfilter');
   if(S.projFilter){
     pf.classList.remove('hidden');
-    pf.innerHTML = `<button class="ghost" onclick="clearProj()">项目 ${H(S.projFilter)} ✕</button>`;
+    pf.innerHTML = `<button class="link" onclick="clearProj()">${H(S.projFilter)}`
+      + `<svg class="ic sm"><use href="#i-x"/></svg></button>`;
   }else{ pf.classList.add('hidden'); pf.innerHTML=''; }
   try{
     const d = await api(url);
     S.docs = d.items;
     if(!d.items.length){
-      $('#lres').innerHTML = '<div class="card muted">这个筛选下没有文档。</div>';
+      $('#lres').innerHTML = `<div class="empty">
+        <svg class="ic"><use href="#i-docs"/></svg>
+        <h4>${q||t||S.projFilter?'这个筛选下没有文档':'库里还没有记忆'}</h4>
+        <p>${q||t||S.projFilter?'放宽筛选条件，或清掉项目过滤再看。'
+             :'点右上角「新建」写第一条，或者让挂了 MCP 的 agent 自己往里写。'}</p>
+      </div>`;
       $('#tstat').textContent = '';
       return;
     }
@@ -662,12 +1174,67 @@ async function loadList(lib, proj){
 
 function renderFlat(items){
   $('#lres').innerHTML = items.map(i=>`<div class="card doc" data-id="${i.id}">
-    <h3>${H(i.title)} <span class="badge">${H(i.type)}</span></h3>
-    <div class="muted" style="font-size:12px">
-      ${i.project?'项目 '+H(i.project)+' · ':''}库 ${H(i.library)} · 重要度 ${i.importance} · 更新 ${H((i.updatedAt||'').slice(0,16).replace('T',' '))}
-      ${(i.tags||[]).map(x=>' <span class="tag">'+H(x)+'</span>').join('')}
+    <h3>${H(i.title)}</h3>
+    <div class="muted" style="font-size:12px;display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+      <span class="badge">${H(TYPE_LABEL[i.type]||i.type)}</span>
+      ${i.project?'<span>'+H(i.project)+'</span><span style="opacity:.4">·</span>':''}
+      <span class="imp${i.importance>=4?' hi':''}"><svg class="ic"><use href="#i-star"/></svg>${i.importance}</span>
+      <span style="opacity:.4">·</span><span>${H(fmtWhen(i.updatedAt))}</span>
+      ${(i.tags||[]).map(x=>'<span class="tag">'+H(x)+'</span>').join('')}
     </div></div>`).join('');
-  $('#tstat').textContent = '';
+  $('#tstat').textContent = `${items.length} 篇`;
+}
+
+/* 相对时间。两条约束打架，取折中：
+   ①"3 个月前"读起来自然但失去定位能力，跟事件对不上 → 超过一周切绝对日期 MM-DD。
+   ② 当天的一批文档如果全渲染成"2 小时前"，一列 12 行完全相同，
+      这一列就白占了最值钱的右侧扫视边缘（实测：23 篇里 13 篇同一小时写入）。
+      → 当天改成显示时钟 HH:MM，同批文档立刻能分出先后。
+   精确时间戳始终在行 title 里。 */
+function fmtWhen(iso){
+  if(!iso) return '';
+  const d = new Date(iso);
+  if(isNaN(d)) return String(iso).slice(0,10);
+  const diff = (Date.now() - d.getTime())/1000;
+  if(diff < 90) return '刚刚';
+  if(diff < 1800) return Math.floor(diff/60)+' 分钟前';
+  const now = new Date();
+  const hm = String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');
+  if(d.toDateString() === now.toDateString()) return hm;
+  const y1 = new Date(now.getTime()-86400000);
+  if(d.toDateString() === y1.toDateString()) return '昨天 '+hm;
+  if(diff < 86400*7) return Math.floor(diff/86400)+' 天前';
+  const y = d.getFullYear();
+  const md = String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+  return y === now.getFullYear() ? md : String(y).slice(2)+'-'+md;
+}
+
+/* 分组视图里，把标题开头重复的项目名整段去掉。
+   实测 fsdp-service 7 篇里 4 篇以项目名开头，组头已经写着 fsdp-service，
+   标题里再重复一遍等于每行先浪费十几个字符。
+   第一版只是把前缀"压灰"，但它照样占位 —— 结果同组里 4 行的真实内容从 x=430 起、
+   3 行从 x=346 起，左边缘参差不齐，反而更难扫。所以改成直接不渲染。
+   完整标题保留在行的 title 属性里（悬停可见），平铺视图和搜索结果不做这个处理
+   —— 那两处没有项目上下文，前缀是必要的定位信息。 */
+function stripPrefix(title, proj){
+  if(proj && title.startsWith(proj)){
+    const rest = title.slice(proj.length);
+    // 后面必须紧跟分隔符才算前缀，否则 "memorys上线记录" 这种会被误切成"上线记录"
+    const m = rest.match(/^[\s·:：\-—|/]+(.+)$/);
+    if(m) return H(m[1]);
+  }
+  return H(title);
+}
+
+/* 热度徽标的阈值必须自适应，不能写死。
+   access_count 随每次检索单调增长：今天"≥5 次"能筛掉一半，一个月后全库都超过 5，
+   徽标又变成每行都有的噪点（第一版就是写死 5，实测当场命中 11/23 = 48%）。
+   改成取当前列表的 85 分位，并要求至少 3 次 —— 冷启动阶段（大家都是 0-1 次）
+   直接返回 Infinity 一个都不显示，比显示"最热的那篇被读过 1 次"诚实。 */
+function hotThreshold(items){
+  const v = items.map(i=>i.accessCount||0).filter(n=>n>=3).sort((a,b)=>a-b);
+  if(v.length < 3) return Infinity;
+  return Math.max(3, v[Math.floor(v.length*0.85)]);
 }
 
 function renderTree(items){
@@ -690,6 +1257,7 @@ function renderTree(items){
   // 但 DOM 上不放这个 key —— 项目名可能含引号/特殊字符，拼进属性选择器会炸。
   // DOM 里改用递增编号，配对靠 data-kid 数字。
   const open = S.treeOpen || (S.treeOpen = {});
+  const HOT = hotThreshold(items);
   let seq = 0;
   const html = projs.map(p=>{
     const types = Object.keys(byProj[p]).sort(
@@ -704,18 +1272,31 @@ function renderTree(items){
       const tk = pk+'\u0000t\u0000'+t;
       if(open[tk] === undefined) open[tk] = true;
       const tid = ++seq;
-      // 星级画满 5 格（空星置灰），左对齐成列才能一眼比高低
-      const rows = docs.map(i=>`<div class="tdoc" data-id="${i.id}" title="${H(i.title)}" role="button" tabindex="0">
-          <span class="tm">📄</span>
-          <span class="tt">${H(i.title)}</span>
-          <span class="imp" role="img" aria-label="重要度 ${i.importance} / 5">${'★'.repeat(i.importance)}<i>${'☆'.repeat(5-i.importance)}</i></span>
-          <span class="td">${H((i.updatedAt||'').slice(0,10))}</span>
-        </div>`).join('');
+      // 稀疏信号选的是 access_count 不是 importance：
+      // 实测 importance 52%(12/23) 都是 5 分，方差接近零；access_count 分布 0→24。
+      // 手填的自我评价没区分度，客观累积的读取次数才有 —— graph-memory 用 validatedCount
+      // 做的是同一件事。阈值走 hotThreshold() 自适应，不写死。
+      // 时间列：日期部分压灰、时分保持正常色。
+      // 试过"同一天只在第一行写日期，后续行只留 21:00" —— 放弃了：裸时间有歧义
+      // （多数人会读成今天），而日期锚点只在子组第一行，子组一折叠锚点就没了。
+      // 现在每行都带完整日期，靠色阶让重复的"昨天"退到背景，有差别的时分留在前台。
+      const rows = docs.map(i=>{
+        const w = fmtWhen(i.updatedAt);
+        const sp = w.lastIndexOf(' ');
+        const show = sp > 0
+          ? `<span class="dd">${H(w.slice(0,sp))}</span> ${H(w.slice(sp+1))}`
+          : H(w);
+        return `<div class="tdoc" data-id="${i.id}" title="${H(i.title)}｜重要度 ${i.importance}/5｜被读取 ${i.accessCount||0} 次｜更新 ${H((i.updatedAt||'').slice(0,16).replace('T',' '))}" role="button" tabindex="0">
+          <span class="tt">${stripPrefix(i.title, p)}</span>
+          ${(i.accessCount||0)>=HOT?`<span class="hot" title="被检索命中 ${i.accessCount} 次 —— 常用">读 ${i.accessCount} 次</span>`:'<span></span>'}
+          <span class="td">${show}</span>
+        </div>`;
+      }).join('');
       return `<div class="tnode">
         <div class="trow" data-n="${tid}" data-key="${encodeURIComponent(tk)}"
              role="button" tabindex="0" aria-expanded="${open[tk]?'true':'false'}">
-          <span class="tcar${open[tk]?' open':''}">▶</span>
-          <span>${TYPE_ICON[t]||'📄'}</span>
+          <span class="tcar${open[tk]?' open':''}"><svg class="ic"><use href="#i-chev"/></svg></span>
+          <svg class="ic sm"><use href="#${TYPE_ICON[t]||'i-file'}"/></svg>
           <span class="tname">${H(TYPE_LABEL[t]||t)}</span>
           <span class="tcount">${docs.length} 篇</span>
         </div>
@@ -725,27 +1306,26 @@ function renderTree(items){
     return `<div class="tnode">
       <div class="trow" data-n="${pid}" data-key="${encodeURIComponent(pk)}"
            role="button" tabindex="0" aria-expanded="${open[pk]?'true':'false'}">
-        <span class="tcar${open[pk]?' open':''}">▶</span>
-        <span>📁</span>
+        <span class="tcar${open[pk]?' open':''}"><svg class="ic"><use href="#i-chev"/></svg></span>
+        <svg class="ic"><use href="#i-folder"/></svg>
         <span class="tname">${H(p)}</span>
-        <span class="tcount">${n} 篇 · ${types.length} 类</span>
+        <span class="tcount">${n} 篇</span>
       </div>
       <div class="tkids${open[pk]?'':' hidden'}" data-kid="${pid}">${kids}</div>
     </div>`;
   }).join('');
 
   $('#lres').innerHTML = '<div class="tree">'+html+'</div>';
-  $('#tstat').textContent = `${projs.length} 个项目 · ${items.length} 篇记忆`;
+  $('#tstat').textContent = `${projs.length} 个项目 · ${items.length} 篇`;
+  syncExpBtn();
 }
 
-function treeAll(openIt){
-  S.treeOpen = S.treeOpen || {};
-  document.querySelectorAll('#lres .trow').forEach(r=>{
-    S.treeOpen[decodeURIComponent(r.dataset.key)] = openIt;
-    r.querySelector('.tcar').classList.toggle('open', openIt);
-    r.setAttribute('aria-expanded', openIt ? 'true' : 'false');
-  });
-  document.querySelectorAll('#lres .tkids').forEach(k=>k.classList.toggle('hidden', !openIt));
+/* toggle 按钮的文案要反映"点了会发生什么"，得在渲染后同步一次 */
+function syncExpBtn(){
+  const b = $('#expbtn'); if(!b) return;
+  const open = S.treeOpen || {};
+  const anyOpen = Object.values(open).some(v=>v);
+  b.textContent = anyOpen ? '全部收起' : '全部展开';
 }
 
 // 事件委托：树是动态重建的，绑在容器上才不会因重渲染丢监听
@@ -880,7 +1460,8 @@ async function branchSaveResult(d){
   // 所以必须等它跑完再写结果，否则提示会被清空。
   await loadEditBranches();
   $('#f-branch').value = d.branch;
-  $('#brhint').innerHTML = `✅ 已写入 <code class="key">${H(d.rel_path)}</code>`
+  $('#brhint').innerHTML = `<svg class="ic sm" style="color:var(--accent2)"><use href="#i-check"/></svg>`
+    + ` 已写入 <code class="key">${H(d.rel_path)}</code>`
     + ` → 分支 <b>${H(d.branch)}</b> commit <code class="key">${H(d.commit)}</code>`
     + (d.created_branch?'（分支是新建的）':'')
     + `<br>${H(d.note)}`;
@@ -893,31 +1474,52 @@ async function delDoc(){
 async function showHistory(){
   try{
     const h = await api('/api/v1/documents/'+S.doc.id+'/history');
-    $('#hist').innerHTML = '<div class="card"><h3>版本历史（git）</h3>'+
+    $('#hist').innerHTML = '<div class="card"><h3 class="ih"><svg class="ic"><use href="#i-history"/></svg>版本历史（git）</h3>'+
       (h.length? '<table><thead><tr><th>提交</th><th>时间</th><th>说明</th></tr></thead><tbody>'+
-      h.map(c=>`<tr><td><code class="key">${H(c.hash)}</code></td><td class="muted">${H(c.date.slice(0,19))}</td><td>${H(c.message)}</td></tr>`).join('')+'</tbody></table>'
-      : '<div class="muted">暂无提交记录</div>')+'</div>';
+      h.map(c=>`<tr><td><code class="key">${H(c.hash)}</code></td><td class="muted">${H(fmtWhen(c.date))}</td><td>${H(c.message)}</td></tr>`).join('')+'</tbody></table>'
+      : '<div class="muted" style="font-size:13px">暂无提交记录</div>')+'</div>';
   }catch(e){ toast(e.message,1); }
 }
 
 /* bootstrap */
 async function loadBootstrap(){
   const p=$('#bproj').value.trim(), b=+$('#bbudget').value||4000;
-  $('#bout').textContent='生成中…';
+  $('#bout').textContent='生成中…'; $('#bcopy').disabled = true;
   try{
     const d = await api('/api/v1/bootstrap?token_budget='+b+(p?'&project='+encodeURIComponent(p):''));
-    $('#bmeta').innerHTML=`<div class="card"><div class="row" style="gap:18px;flex-wrap:wrap">
-      <span>范围 <b>${H(d.scope_label || d.project || 'main 库全部')}</b></span><span class="muted">选中 ${d.document_count}/${d.total_documents} 篇</span>
-      <span class="muted">约 ${d.estimated_tokens} tokens（预算 ${d.token_budget}）</span></div></div>`;
+    // 预算用量做成进度条：光看两个数字看不出"离上限还有多远"
+    const pct = Math.min(100, Math.round(d.estimated_tokens / Math.max(1,d.token_budget) * 100));
+    const near = pct >= 92;   // 接近打满 → 说明可能还有内容没装进来
+    $('#bmeta').innerHTML=`<div class="card">
+      <div class="row" style="gap:16px;flex-wrap:wrap;align-items:baseline">
+        <span>范围 <b>${H(d.scope_label || d.project || 'main 库全部')}</b></span>
+        <span class="muted" style="font-size:12.5px">收录 ${d.document_count}/${d.total_documents} 篇</span>
+        ${(d.linked_extra||[]).length?`<span class="badge" title="被 implements 关系带出来的">+${d.linked_extra.length} 篇关联</span>`:''}
+      </div>
+      <div style="margin-top:10px">
+        <div class="row" style="justify-content:space-between;font-size:12px" class="muted">
+          <span class="muted">${d.estimated_tokens} / ${d.token_budget} tokens</span>
+          <span class="muted">${pct}%${near?' · 已接近预算上限，调大能收更多':''}</span>
+        </div>
+        <div style="height:5px;border-radius:99px;background:var(--panel2);margin-top:5px;overflow:hidden">
+          <div style="height:100%;width:${pct}%;border-radius:99px;background:var(--${near?'warn':'accent-bar'})"></div>
+        </div>
+      </div></div>`;
     S.boot = '# 记忆上下文（'+(d.scope_label || ('项目：'+d.project))+'）\n\n'+d.documents.map(x=>
       `## [${x.type}] ${x.title}${x.project?' · 项目 '+x.project:''}${(x.tags||[]).length?' · 标签 '+x.tags.join(','):''}\n${x.content}${x.truncated?'\n…（已截断）':''}`
     ).join('\n\n---\n\n');
     $('#bout').textContent = S.boot || '（这个项目还没有记忆）';
-  }catch(e){ toast(e.message,1); $('#bout').textContent=''; }
+    // 有内容了才放开复制按钮
+    $('#bcopy').disabled = !S.boot;
+  }catch(e){ toast(e.message,1); $('#bout').textContent=''; $('#bcopy').disabled = true; }
 }
 function copyBootstrap(){
   if(!S.boot){ toast('先点生成',1); return; }
-  navigator.clipboard.writeText(S.boot).then(()=>toast('已复制，粘到新会话开场即可'));
+  // 走 copyCode 的降级逻辑，非 HTTPS 下 navigator.clipboard 不存在
+  const tmp = document.createElement('pre');
+  tmp.id = '__boottmp'; tmp.style.display='none'; tmp.textContent = S.boot;
+  document.body.appendChild(tmp);
+  copyCode('__boottmp').finally(()=>tmp.remove());
 }
 
 /* 回收站 */
@@ -925,11 +1527,18 @@ async function loadTrash(){
   try{
     const d = await api('/api/v1/documents?trash=true&limit=200');
     $('#tres').innerHTML = d.items.length? d.items.map(i=>`<div class="card">
-      <div class="row"><div style="flex:1">
-        <h3>${H(i.title)} <span class="badge">${H(i.type)}</span></h3>
-        <div class="muted" style="font-size:12px">库 ${H(i.library)} · 删除于 ${H((i.updatedAt||'').slice(0,16).replace('T',' '))}</div>
-      </div><button class="primary" onclick="restore(${i.id})">恢复</button></div></div>`).join('')
-      : '<div class="card muted">回收站是空的。</div>';
+      <div class="row"><div style="flex:1;min-width:0">
+        <h3>${H(i.title)}</h3>
+        <div class="muted" style="font-size:12px;display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+          <span class="badge">${H(TYPE_LABEL[i.type]||i.type)}</span>
+          <span>删除于 ${H(fmtWhen(i.updatedAt))}</span>
+        </div>
+      </div><button class="primary" onclick="restore(${i.id})"><svg class="ic sm"><use href="#i-back"/></svg>恢复</button></div></div>`).join('')
+      : `<div class="empty">
+           <svg class="ic"><use href="#i-trash"/></svg>
+           <h4>回收站是空的</h4>
+           <p>删掉的记忆会先放到这里，md 文件移进 .trash 且 git 留有记录，随时能恢复。</p>
+         </div>`;
   }catch(e){ toast(e.message,1); }
 }
 async function restore(id){
@@ -943,21 +1552,26 @@ async function loadKeys(){
     const ks = await api('/api/v1/keys');
     $('#kbody').innerHTML = ks.length? ks.map(k=>`<tr>
       <td>${H(k.name)}</td><td><code class="key">${H(k.prefix)}…</code></td>
-      <td class="muted">${H((k.createdAt||'').slice(0,16).replace('T',' '))}</td>
-      <td class="muted">${k.lastUsedAt?H(k.lastUsedAt.slice(0,16).replace('T',' ')):'未使用'}</td>
-      <td><button class="danger" onclick="revokeKey(${k.id})">吊销</button></td></tr>`).join('')
-      : '<tr><td colspan="5" class="muted">还没有 Key。创建一个给 agent 用。</td></tr>';
+      <td class="muted">${H(fmtWhen(k.createdAt))}</td>
+      <td class="muted">${k.lastUsedAt?H(fmtWhen(k.lastUsedAt)):'<span style="opacity:.6">未使用</span>'}</td>
+      <td style="text-align:right"><button class="danger" onclick="revokeKey(${k.id})"><svg class="ic sm"><use href="#i-x"/></svg>吊销</button></td></tr>`).join('')
+      : '<tr><td colspan="5" class="muted" style="padding:20px;text-align:center">还没有 Key。创建一个给 agent 用。</td></tr>';
   }catch(e){ toast(e.message,1); }
 }
 async function createKey(){
   const name=$('#kname').value.trim()||'default';
   try{
     const k = await api('/api/v1/keys',{method:'POST',body:JSON.stringify({name})});
+    // 缓存明文：MCP 配置页要拿它填进配置里，否则用户还得手动替换占位符。
+    // 只存在本地 localStorage，不回传服务端（服务端只有哈希）。
+    try{ localStorage.setItem('mem_lastkey', k.key); }catch(e){}
     $('#knew').innerHTML=`<div class="card" style="border-color:var(--accent2)">
-      <h3>Key 已创建：${H(k.name)}</h3>
-      <div class="muted" style="margin-bottom:8px">只显示这一次，请立刻复制保存。</div>
-      <code class="key">${H(k.key)}</code>
-      <div style="margin-top:10px"><button onclick="navigator.clipboard.writeText('${H(k.key)}').then(()=>toast('已复制'))">复制</button></div></div>`;
+      <h3 class="ih"><svg class="ic"><use href="#i-key"/></svg>Key 已创建：${H(k.name)}</h3>
+      <div class="muted" style="margin-bottom:10px;font-size:13px">只显示这一次，请立刻复制保存。MCP 配置页已自动填好这个 Key。</div>
+      <div class="row" style="gap:8px;flex-wrap:wrap">
+        <code class="key brk" id="newkeyval">${H(k.key)}</code>
+        <button onclick="copyCode('newkeyval')"><svg class="ic sm"><use href="#i-copy"/></svg>复制</button>
+      </div></div>`;
     $('#kname').value=''; loadKeys();
   }catch(e){ toast(e.message,1); }
 }
@@ -995,10 +1609,16 @@ async function loadSchedule(){
       return;
     }
     const ok = d.last_result === 'success' && d.last_exit === '0';
+    // 状态图标用 SVG：emoji ✅⚠️ 在不同平台色相差别很大，
+    // 而这里是状态语义，必须跟主题色系一致
+    const dot = (good, txt) => `<svg class="ic sm" style="color:var(--${good?'accent2':'warn'})">`
+      + `<use href="#i-${good?'check':'warn'}"/></svg> ${txt}`;
     const last = d.last_finished
-      ? `上次 ${H(d.last_finished)} · ${ok?'✅ 成功':'⚠️ '+H(d.last_result||'失败')}`
-      : '还没跑过（装好后第一次要等到点）';
-    el.innerHTML = `计划：<b>${H(d.schedule)}</b> · ${d.active?'✅ 已启用':'⚠️ timer 未激活'}`
+      // 三行标签统一带全角冒号：前两行是"计划："/"下次："，这行漏了冒号，
+      // 三个标签的收尾字符不一致，视觉上像没对齐。
+      ? `上次：${H(d.last_finished)} · ${dot(ok, ok?'成功':H(d.last_result||'失败'))}`
+      : '上次：还没跑过（装好后第一次要等到点）';
+    el.innerHTML = `计划：<b>${H(d.schedule)}</b> · ${dot(!!d.active, d.active?'已启用':'timer 未激活')}`
       + `<br>下次：${H(d.next || '—')}`
       + `<br>${last}`
       + `<br><span style="font-size:12px">推送前会先重建索引，手工改过 md 也能带上。`
@@ -1016,10 +1636,12 @@ async function loadBranches(){
     S.branch = d.current;   // 下拉被用户取消时要回弹到这个值
     $('#dirtyflag').textContent = d.dirty ? '有未提交的改动（切换/合并前会自动提交）' : '工作区干净';
 
-    // 当前分支下拉：选中即切换
+    // 当前分支下拉：选中即切换。
+    // 原来在选中项前拼一个 ● 当"当前"标记 —— 但下拉里显示的本来就是当前值，
+    // 那个圆点纯冗余，还让选项文字左缘对不齐。
     const sel = $('#brsel');
     sel.innerHTML = d.branches.map(b=>
-      `<option value="${H(b.name)}"${b.current?' selected':''}>${b.current?'● ':''}${H(b.name)}</option>`
+      `<option value="${H(b.name)}"${b.current?' selected':''}>${H(b.name)}</option>`
     ).join('');
 
     // 合并源下拉：排掉当前分支（不能合并到自己）
@@ -1038,14 +1660,17 @@ async function loadBranches(){
     $('#branchlist').innerHTML = d.branches.map(b=>{
       const cur = b.current;
       const acts = cur
-        ? '<span class="muted">当前分支</span>'
+        ? '<span class="badge" style="color:var(--accent-text);border-color:var(--accent-bar)">当前</span>'
         : `<button data-act="switch" data-br="${H(b.name)}">切到此分支</button>
-           <button class="danger" data-act="del" data-br="${H(b.name)}">删除</button>`;
-      return `<div class="card" style="margin:6px 0;${cur?'border-color:var(--accent-bar);':''}">
+           <button class="danger" data-act="del" data-br="${H(b.name)}"><svg class="ic sm"><use href="#i-trash"/></svg>删除</button>`;
+      return `<div class="card" style="margin:6px 0;box-shadow:none;${cur?'border-color:var(--accent-bar);background:var(--active);':''}">
         <div class="row" style="justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
-          <div class="col" style="gap:2px">
-            <div><b>${cur?'● ':''}${H(b.name)}</b> <code class="key">${H(b.hash)}</code></div>
-            <div class="muted">${H(b.subject)} · ${H(b.date.slice(0,19))}</div>
+          <div class="col" style="gap:2px;min-width:0">
+            <div class="row" style="gap:7px">
+              <svg class="ic sm" style="color:var(--${cur?'accent-bar':'faint'})"><use href="#i-branch"/></svg>
+              <b>${H(b.name)}</b> <code class="key">${H(b.hash)}</code>
+            </div>
+            <div class="muted" style="font-size:12px">${H(b.subject)} · ${H(fmtWhen(b.date))}</div>
           </div>
           <div class="row" style="gap:6px">${acts}</div>
         </div></div>`;
