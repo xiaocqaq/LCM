@@ -7,17 +7,52 @@
 # 起本地实例：
 #   MEM_MODE=local MEM_LOCAL_HOME=/tmp/memlocal-test \
 #     .venv/bin/python -m uvicorn app.main:app --port 8650
-cd /opt/memorys || exit 1
-export PYTHONPATH=/opt/memorys
+# 用脚本自己的位置定位项目根，不写死 /opt/memorys。
+# 写死的后果实测踩到了：在 git worktree（/opt/memorys-local）里跑这个脚本，
+# 它 cd 回 /opt/memorys 去找那边不存在的测试文件，
+# 于是新加的三套全部报 "can't open file" —— 而下面的 run 还照样打 FAIL=0。
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$ROOT" || exit 1
+export PYTHONPATH="$ROOT"
 export MEM_TEST_BASE=https://repo.xlingo.fun
 KEY=$(cat /root/.memorys-hermes-key)
 SQLITE_BASE=${SQLITE_BASE:-http://127.0.0.1:8650}
+HARNESS_ERRORS=0
+
+# 有几套（e2e / mcp / vec_search / local_parity 的 PG 对照…）要连生产 PG，
+# 配置在部署目录的 .env 里。在 git worktree 里跑时本目录没有 .env，
+# 那些套件会以"缺少必填配置 MEM_DATABASE_URL"中止 ——
+# 修好 run 的退出码判定之前，这种中止会被打成 FAIL=0 ✅ 而完全看不见。
+#
+# 只在本目录确实没有 .env 时才借用部署目录的，绝不覆盖已有配置。
+if [ ! -f "$ROOT/.env" ] && [ -f /opt/memorys/.env ]; then
+  export MEM_ENV_FILE=/opt/memorys/.env
+  set -a; . /opt/memorys/.env; set +a
+  echo "（本目录无 .env，已借用 /opt/memorys/.env 跑需要 PG 的套件）"
+fi
 
 run() {
   local name="$1"; shift
-  local out
-  out=$("$@" 2>&1)
-  printf '%-22s FAIL=%s  %s\n' "$name" "$(echo "$out" | grep -c '^\[FAIL\]')" "$(echo "$out" | tail -1)"
+  local out rc fails
+  out=$("$@" 2>&1); rc=$?
+  fails=$(echo "$out" | grep -c '^\[FAIL\]')
+
+  # 退出码必须参与判定。
+  #
+  # 原来只数 [FAIL] 行数，于是"进程根本没跑起来"（文件不存在、import 失败、
+  # 语法错误）会打印 FAIL=0 —— 一个永远不会红的测试等于没有测试。
+  # 实测就是这么漏掉三套的：文件路径错了，输出是
+  # "can't open file ...: [Errno 2]"，里面没有 [FAIL] 字样，照样 FAIL=0 ✅。
+  if [ "$rc" -ne 0 ] && [ "$fails" -eq 0 ]; then
+    HARNESS_ERRORS=$((HARNESS_ERRORS + 1))
+    printf '%-22s ERROR   退出码 %s（没跑起来，不是断言失败）：%s\n' \
+      "$name" "$rc" "$(echo "$out" | tail -1)"
+    return
+  fi
+  if [ "$fails" -gt 0 ]; then
+    HARNESS_ERRORS=$((HARNESS_ERRORS + 1))
+  fi
+  printf '%-22s FAIL=%s  %s\n' "$name" "$fails" "$(echo "$out" | tail -1)"
 }
 
 echo "===== 测试套件 ====="
@@ -46,6 +81,8 @@ if curl -s -o /dev/null --max-time 3 "$SQLITE_BASE/api/health"; then
 else
   printf '%-22s SKIP    本地实例未运行（%s）\n' "local_mode" "$SQLITE_BASE"
 fi
+# stdio 自己起子进程、自己用临时目录，不依赖任何在跑的实例 → 无条件跑
+run mcp_stdio           .venv/bin/python tests/mcp_stdio_test.py
 
 echo
 echo "===== 向量覆盖率 ====="
@@ -72,3 +109,12 @@ printf '%-14s %s\n' "/mcp(key)" \
 echo
 echo "===== Hermes 侧闭环 ====="
 hermes mcp test memorys 2>&1 | grep -E 'Connected|Tools discovered|failed'
+
+echo
+echo "===== 总判定 ====="
+if [ "$HARNESS_ERRORS" -eq 0 ]; then
+  echo "全部通过（无失败断言、无未跑起来的套件）"
+  exit 0
+fi
+echo "有 $HARNESS_ERRORS 套存在失败或没跑起来 —— 往上翻 FAIL=/ERROR 行"
+exit 1

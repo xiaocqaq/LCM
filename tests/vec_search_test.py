@@ -120,8 +120,25 @@ async def main():
             Document.deleted_at.is_(None)).limit(1))).scalars().first()
         origt = S.embed_texts
 
+        calls = {"n": 0}
+
         async def wrongdim(texts, **kw):
+            calls["n"] += 1
             return [[0.1] * 999 for _ in texts]   # 故意给错维度
+
+        # 必须先清掉这篇已有的向量，否则这个用例测不到任何东西。
+        #
+        # _reindex_document 只给"旧向量里没有的内容"调上游
+        # （need_idx 靠 old_vecs 判断，那是刻意的增量优化）。
+        # 这篇文档向量已存在、内容也没变 → 整段 embed 被跳过，
+        # 打桩 0 次调用，旧向量原地保留，于是断言看到 count(embedding)=1 而失败。
+        # 表面上像是"维度守卫失效"，实际上守卫压根没被执行 ——
+        # 一个前提不成立的用例，失败和通过都不说明产品对不对。
+        # 用 calls["n"] 断言桩真的被调过，就是防止这种假测试。
+        await s.execute(text(
+            "UPDATE chunks SET embedding = NULL WHERE document_id=:i"), {"i": d.id})
+        await s.commit()
+
         S.embed_texts = wrongdim
         SV.embed_texts = wrongdim
         await SV._reindex_document(s, d)
@@ -129,6 +146,7 @@ async def main():
         n = (await s.execute(text(
             "SELECT count(*), count(embedding) FROM chunks WHERE document_id=:i"
         ), {"i": d.id})).one()
+        ck(calls["n"] > 0, f"打桩真的被调用了（{calls['n']} 次，0 次说明用例没测到东西）")
         ck(n[1] == 0, f"999 维向量被拒，未写入（{n[1]}/{n[0]} 有向量）")
         S.embed_texts = origt
         SV.embed_texts = origt

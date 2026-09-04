@@ -62,7 +62,21 @@ async def mcp_asgi_app(scope, receive, send):
             ctx = await authenticate_headers(h.get("authorization"), h.get("x-api-key"), s)
     except Exception as e:
         detail = getattr(e, "detail", None) or str(e) or "认证失败"
-        await _send_401(send, f"MCP 认证失败：{detail}")
+        # 401 必须说清是"哪种凭证"没通过，否则排查时完全看不出方向。
+        #
+        # 实测踩到的场景：local 模式明明免鉴权，客户端却偶发 401 —— 原因是
+        # 客户端**带了**一个过期/无效的 Authorization 头（比如上一次连别的
+        # 实例时缓存下来的），而 authenticate_headers 的规则是"带了凭证就必须
+        # 验证通过"，于是免鉴权这条路根本不会走到。
+        # 原来的信息只有"认证失败"，看不出客户端其实发了凭证，
+        # 白排查了很久服务端并发和实例状态。
+        got = []
+        if h.get("authorization"):
+            got.append("Authorization")
+        if h.get("x-api-key"):
+            got.append("X-Api-Key")
+        why = f"（客户端发来的凭证：{', '.join(got)}）" if got else "（客户端没发任何凭证）"
+        await _send_401(send, f"MCP 认证失败：{detail}{why}")
         return
 
     if ctx is None or getattr(ctx, "user", None) is None:

@@ -531,6 +531,35 @@ bash tests/cleanup.sh           # 清测试残留
     漏了这步后果很隐蔽：md 确实落盘、写入一切正常，但 `try_commit_all` 内部
     catch 掉所有异常，git 提交静默不发生，版本历史永远是空的
 
+### MCP stdio
+
+51. **客户端配置不能写 `python -m app.mcp_stdio`**。`-m` 要求项目根在
+    `sys.path` 里，而 Python 只会把**当前工作目录**加进去，所以那样只在
+    cwd 恰好是项目根时才work。多数 MCP 客户端没有 cwd 可配。
+    症状极具误导性：在项目目录里测能连上，换个目录就
+    `Connection closed`（客户端看不到子进程的 `ModuleNotFoundError`）。
+    解法是 `bin/memorys-mcp`，入口自己定位项目根
+52. **判断"是否已在目标 venv 里"不能用 `resolve()` 比解释器路径**。
+    venv 的 `bin/python` 是指向基础解释器的软链接，所以两个**不同**的 venv
+    resolve 之后是同一个路径，判断永远为真 → 自动切 venv 的逻辑被跳过，
+    依赖明明缺着还用错的解释器继续跑。要用 `sys.prefix` 比 venv 目录
+53. **依赖探针要覆盖全部关键包，不能只试一个**。实测本机系统 python 恰好
+    装了 fastapi 但没装 sqlalchemy，只探 fastapi 就误判"依赖齐了"
+54. **stdio 模式下 stdout 被 JSON-RPC 占用**，任何 `print()` 混进去都会让
+    客户端解析失败（症状是 "unexpected token" 或直接连不上，服务端看着正常）。
+    而启动期本来就有正常日志（比如 SQLite 补列提示）→ 初始化阶段必须把
+    stdout 整体重定向到 stderr，协议接管后才放回
+55. **stdio 没有 lifespan**，建表/DDL 不会自动跑。stdio 很可能是这个库第一次
+    被启动（客户端拉起来就直接用），必须自己做一次等价初始化，
+    否则第一次调工具就 `no such table: documents`
+56. **凭证检查要放在连库之前**。顺序反了的话，没配凭证的用户看到的是一大段
+    asyncpg `ConnectionRefusedError` 栈，真正的原因（少了 `MEM_API_KEY`）
+    被埋在栈信息之外
+57. **免鉴权模式下客户端不能带 `Authorization` 头**。规则是"带了凭证就必须
+    验证通过"，所以一个填错的/占位的 token 会直接 401，而免鉴权那条路
+    根本不会被走到。401 的 detail 里要写明"客户端发来了哪种凭证"，
+    否则排查方向完全看不出来（会误以为是服务端并发或实例状态问题）
+
 ## 技术栈
 
 Python 3.11 / FastAPI / SQLAlchemy(asyncio) / MCP SDK（钉 `<2`，2.x 把

@@ -1,0 +1,80 @@
+#!/usr/bin/env python3
+"""stdio MCP 入口，可以从任意目录用绝对路径调用。
+
+为什么不直接让客户端跑 `python -m app.mcp_stdio`
+--------------------------------------------------
+`-m` 要求项目根目录在 `sys.path` 里，而 Python 只会把**当前工作目录**加进去。
+于是那种写法只在 cwd 恰好是项目根时才work：
+
+    cd /opt/memorys-local && python -m app.mcp_stdio      # 能跑
+    cd ~ && /opt/memorys-local/.venv/bin/python -m app.mcp_stdio
+    # ModuleNotFoundError: No module named 'app'
+
+这是实测踩到的 —— `hermes mcp add` 存下来的配置没有 cwd 字段，
+在项目目录里 `hermes mcp test` 通过，换到别的目录就 "Connection closed"，
+而报错信息完全不提工作目录，只说连接被关掉了。
+
+更麻烦的是不少 MCP 客户端根本没有 cwd 可配（只有 command / args / env）。
+所以正确的做法是入口自己定位项目根，而不是要求调用方站在对的地方。
+
+用法
+----
+    /opt/memorys-local/bin/memorys-mcp            # 从任何目录都行
+
+客户端配置里就填这个绝对路径，不用管 cwd。
+"""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+# 本文件在 <项目根>/bin/，所以父目录的父目录就是项目根。
+# resolve() 处理软链接：客户端很可能把这个脚本链到 ~/.local/bin 之类的地方。
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+
+def _reexec_in_venv() -> None:
+    """如果当前解释器没装依赖，但项目里有 .venv，就用它重新执行自己。
+
+    这样客户端配置可以简单写成这个脚本的绝对路径，不必知道 venv 在哪。
+    没有 venv 时不做任何事，让后面的 import 抛出真实的 ModuleNotFoundError
+    —— 那个报错比"我猜你没装依赖"更准确。
+    """
+    # 探针要覆盖全部关键依赖，不能只试一个。
+    # 实测踩到：本机系统 python3 恰好装了 fastapi 但没装 sqlalchemy，
+    # 只探 fastapi 就以为依赖齐了，不重新 exec，结果照样
+    # ModuleNotFoundError: No module named 'sqlalchemy'。
+    try:
+        import fastapi      # noqa: F401
+        import mcp          # noqa: F401
+        import sqlalchemy   # noqa: F401
+        return                      # 依赖齐了，就用当前解释器
+    except ImportError:
+        pass
+
+    import os
+    venv_py = ROOT / ".venv" / "bin" / "python"
+    if not venv_py.exists():
+        return
+
+    # 防自我递归的判断必须用 sys.prefix，不能用 resolve() 比解释器路径。
+    #
+    # 实测踩到：venv 里的 bin/python 是指向基础解释器的软链接，
+    # 所以两个**不同的** venv resolve() 之后是同一个路径 ——
+    #     /opt/memorys-local/.venv/bin/python      -> .../cpython-3.11.16/bin/python3.11
+    #     /usr/local/lib/hermes-agent/venv/bin/python3 -> .../cpython-3.11.16/bin/python3.11
+    # 于是"我是不是已经在目标 venv 里"永远判成 True，re-exec 被跳过，
+    # 症状就是依赖明明缺着却还是用错的解释器继续跑。
+    # sys.prefix 指向 venv 自己的目录，才能真正区分两个环境。
+    if Path(sys.prefix).resolve() != (ROOT / ".venv").resolve():
+        os.execv(str(venv_py), [str(venv_py), str(Path(__file__).resolve()), *sys.argv[1:]])
+
+
+_reexec_in_venv()
+
+from app.mcp_stdio import main  # noqa: E402  （必须在改完 sys.path 之后 import）
+
+if __name__ == "__main__":
+    main()

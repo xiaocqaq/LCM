@@ -107,7 +107,19 @@ MEM_EMBED_DIM=1024
 
 ## 挂到 AI agent
 
-本地模式的 MCP 地址是 `http://127.0.0.1:8650/mcp`，**免鉴权时不需要任何请求头**。
+本地模式有**两种传输**，都是同一套 10 个工具、同一个库，选一种就行。
+
+| | HTTP | stdio |
+|---|---|---|
+| 要不要先起服务 | 要（`python -m app.local`） | 不要，客户端按需拉起 |
+| 占端口 | 占 8650 | 不占 |
+| 生命周期 | 自己管（开着就一直在） | 跟客户端一起退出 |
+| 能同时开 Web UI | 能 | 不能（stdio 没有 HTTP 界面） |
+| 适合 | 平时就要看 Web UI | 只让 agent 用，不想管进程 |
+
+### A. HTTP
+
+地址 `http://127.0.0.1:8650/mcp`，**免鉴权时不要配任何请求头**。
 
 Claude Desktop / Cursor / VS Code（JSON）：
 
@@ -131,6 +143,70 @@ url = "http://127.0.0.1:8650/mcp"
 
 注意这是远程 HTTP 服务，**不要写 `command`** —— 写了会被当成"启动本地进程"，
 报 `program path has no file name`。
+
+还有一条更隐蔽的：**免鉴权模式下别配 `Authorization` 头**。
+规则是"带了凭证就必须验证通过"，所以配一个填错的/占位的 token 不是"多余但无害"，
+而是直接 401 —— 而免鉴权那条路根本不会被走到。
+排查时看服务端返回的 detail，它会写明"客户端发来的凭证：Authorization"。
+
+### B. stdio
+
+入口是 `bin/memorys-mcp`，**用绝对路径**，从任何目录都能跑：
+
+```json
+{
+  "mcpServers": {
+    "memorys": {
+      "command": "/path/to/memorys/bin/memorys-mcp",
+      "env": { "MEM_MODE": "local" }
+    }
+  }
+}
+```
+
+Codex CLI：
+
+```toml
+[mcp_servers.memorys]
+command = "/path/to/memorys/bin/memorys-mcp"
+env = { MEM_MODE = "local" }
+```
+
+Hermes Agent 直接用 CLI 加：
+
+```bash
+hermes mcp add memorys-local --command /path/to/memorys/bin/memorys-mcp \
+  --env MEM_MODE=local
+```
+
+**不要在客户端配置里写 `python -m app.mcp_stdio`。** 那样只在工作目录恰好是
+项目根时才work —— `-m` 依赖 cwd 在 `sys.path` 里，而多数 MCP 客户端
+没有 cwd 可配。换个目录就 `ModuleNotFoundError: No module named 'app'`，
+而客户端那边只会显示 "Connection closed"，完全看不出是工作目录的事。
+`bin/memorys-mcp` 自己定位项目根，并在依赖缺失时自动切到项目 venv，
+所以不用管 cwd、也不用写 venv 里的 python 路径。
+
+server 模式也能用 stdio，但必须给凭证（多用户，没凭证无法确定是谁）：
+
+```bash
+MEM_API_KEY=hk_xxx /path/to/memorys/bin/memorys-mcp
+```
+
+### 验证
+
+```bash
+# stdio：应打印 "[memorys] stdio 就绪：user=... backend=sqlite ..."（走 stderr）
+MEM_MODE=local /path/to/memorys/bin/memorys-mcp < /dev/null
+
+# HTTP：应返回 10 个工具
+curl -s -X POST http://127.0.0.1:8650/mcp/ \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' \
+  | grep -o '"name":"memory_[a-z_]*"' | sort -u | wc -l
+```
+
+自动化测试：`python tests/mcp_stdio_test.py`（24 项，真起子进程走 JSON-RPC）。
 
 ---
 
