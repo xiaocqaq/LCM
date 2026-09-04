@@ -1,4 +1,9 @@
-"""核心业务：文档 CRUD（md 为准、DB 索引）、检索（关键词+trgm+RRF 混合）、bootstrap。"""
+"""核心业务：文档 CRUD（md 为准、DB 索引）、检索（关键词+trgm+RRF 混合）、bootstrap。
+
+数据库方言差异全部收在 dialect 模块里 —— 这一层只负责业务与排序逻辑，
+两个后端共用同一份实现。哪里出现 `DB_BACKEND ==` 的判断，都是因为
+那一步真的没法抽（比如 PG 要 CAST 向量、SQLite 要额外删 FTS 行）。
+"""
 import asyncio
 import re
 import uuid
@@ -9,9 +14,10 @@ from sqlalchemy import delete, desc, func, select, text
 from sqlalchemy import update as sqlalchemy_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from . import dialect
 from . import gitsvc
 from . import links as links_mod
-from .config import settings
+from .config import DB_BACKEND, settings
 from .mdstore import (
     LINK_TYPES,
     VALID_TYPES,
@@ -25,7 +31,7 @@ from .mdstore import (
     user_root,
 )
 from .models import Chunk, Document, User
-from .search import embed_query, embed_texts, expand_tokens, to_tsquery
+from .search import embed_query, embed_texts, expand_tokens, tokenize, to_tsquery
 
 
 def _now():
@@ -33,15 +39,28 @@ def _now():
 
 
 def _tsvector_literal(content: str) -> str:
-    """索引侧词串：走 expand_tokens（含路径段 + 概念同义词），空格分隔喂给 to_tsvector。
+    """索引侧词串：走 expand_tokens（含路径段 + 概念同义词），空格分隔。
 
     注意用空格而不是 '|'：这里的产物是 to_tsvector 的输入（普通文本），
     不是 tsquery。用 '|' 会让管道符本身变成 lexeme。
+
+    SQLite 侧同一个串直接写进 FTS5 表 —— 两端喂给关键词索引的东西必须一样，
+    否则同一个查询在本地和服务器上召回集不同，用户会以为数据没同步。
     """
     words = expand_tokens(f"{content}")
     if not words:
         return ""
     return " ".join(w.replace("'", "") for w in words)
+
+
+def chunk_lexemes(title: str, project: str, tags: list, heading: str, content: str) -> str:
+    """一个 chunk 的关键词索引串。写入和重建索引都走这里，保证口径一致。
+
+    抽出来是给 dialect.rebuild_fts() 当回调用的 —— 重建索引时必须用
+    跟写入时**完全相同**的规则，否则重建之后召回集会变，
+    而"重建索引让搜索结果变了"这种问题没人会想到是口径不一致。
+    """
+    return _tsvector_literal(f"{title} {project} {' '.join(tags or [])} {heading} {content}")
 
 
 async def upsert_user_from_xiaoai(session: AsyncSession, u: dict) -> User:
@@ -308,6 +327,10 @@ async def soft_delete_document(session: AsyncSession, user: User, doc: Document)
     要恢复的话 restore 会重新 reindex，chunk 本来就是可重建的派生数据。
     """
     doc.deleted_at = _now()
+    # 顺序要紧：先删 FTS 行（它按 chunk_id 反查 chunks 表），再删 chunk。
+    # 反过来的话 chunks 已经没了，那个子查询返回空集，FTS 行永远留下 ——
+    # 之后检索 JOIN 不上就静默少结果，而 count(*) 又对不上，很难查。
+    await dialect.drop_chunk_lexemes(session, DB_BACKEND, doc.id)
     await session.execute(delete(Chunk).where(Chunk.document_id == doc.id))
     # 删掉一篇"取代者"之后，被它取代的文档必须重新可见 ——
     # 否则旧版本永久隐身，而且没有任何地方能看出为什么。
@@ -367,10 +390,12 @@ async def _reindex_document(session: AsyncSession, doc: Document, do_embed: bool
     早先的实现是先 DELETE 再重插、向量一起没，拿它刷同义词清空过全库向量。
     """
     # 先取旧 chunk 的 (内容 → 向量)。用原始 SQL 读 embedding 列的文本形式，
-    # ORM 那边这一列是 Text（启动时 ALTER 成 vector），走 ORM 会拿到 str 或 None。
+    # ORM 那边这一列是 Text（PG 上启动时 ALTER 成 vector），走 ORM 会拿到 str 或 None。
+    # PG 需要 ::text 把 vector 转回文本；SQLite 那一列本来就是 text，加转换会报错。
     old_vecs: dict[str, str] = {}
+    _emb_expr = "embedding::text" if DB_BACKEND == dialect.PG else "embedding"
     rows = (await session.execute(
-        text("SELECT content, embedding::text FROM chunks "
+        text(f"SELECT content, {_emb_expr} FROM chunks "
              "WHERE document_id = :d AND embedding IS NOT NULL"),
         {"d": doc.id},
     )).all()
@@ -378,6 +403,7 @@ async def _reindex_document(session: AsyncSession, doc: Document, do_embed: bool
         if content_ and vec_:
             old_vecs[content_] = vec_
 
+    await dialect.drop_chunk_lexemes(session, DB_BACKEND, doc.id)
     await session.execute(delete(Chunk).where(Chunk.document_id == doc.id))
     pieces = split_chunks(doc.content)
     if not pieces:
@@ -399,25 +425,34 @@ async def _reindex_document(session: AsyncSession, doc: Document, do_embed: bool
                     fresh[i] = v
 
     for seq, p in enumerate(pieces):
-        lex = _tsvector_literal(f"{doc.title} {doc.project} {' '.join(doc.tags or [])} {p['heading']} {p['content']}")
+        lex = chunk_lexemes(doc.title, doc.project, doc.tags or [], p["heading"], p["content"])
         ch = Chunk(document_id=doc.id, seq=seq, heading=p["heading"], content=p["content"])
         session.add(ch)
         await session.flush()
-        await session.execute(
-            text("UPDATE chunks SET tsv = to_tsvector('simple', :lex) WHERE id = :id"),
-            {"lex": lex, "id": ch.id},
-        )
+        # 关键词索引：PG 写 chunks.tsv，SQLite 写 chunks_fts 虚拟表
+        await dialect.write_chunk_lexemes(session, DB_BACKEND, ch.id, lex)
         reuse = old_vecs.get(p["content"])
-        if reuse:
-            await session.execute(
-                text(f"UPDATE chunks SET embedding = CAST(:vec AS vector({settings.embed_dim})) WHERE id = :id"),
-                {"vec": reuse, "id": ch.id},
-            )
-        elif seq in fresh:
-            await session.execute(
-                text(f"UPDATE chunks SET embedding = CAST(:vec AS vector({settings.embed_dim})) WHERE id = :id"),
-                {"vec": "[" + ",".join(f"{x:.6f}" for x in fresh[seq]) + "]", "id": ch.id},
-            )
+        vec_str = reuse if reuse else (
+            dialect.encode_vector(fresh[seq]) if seq in fresh else None)
+        if vec_str:
+            await _write_embedding(session, ch.id, vec_str)
+
+
+async def _write_embedding(session: AsyncSession, chunk_id: int, vec_str: str) -> None:
+    """写向量。PG 要 CAST 成 vector 类型，SQLite 直接存文本。
+
+    PG 侧必须显式 CAST：embedding 列启动时被 ALTER 成 vector(dim)，
+    塞字符串进去会报类型错误。SQLite 侧那一列还是 Text，CAST 反而没有 vector 类型。
+    """
+    if DB_BACKEND == dialect.PG:
+        await session.execute(
+            text(f"UPDATE chunks SET embedding = CAST(:vec AS vector({settings.embed_dim})) "
+                 f"WHERE id = :id"),
+            {"vec": vec_str, "id": chunk_id})
+    else:
+        await session.execute(
+            text("UPDATE chunks SET embedding = :vec WHERE id = :id"),
+            {"vec": vec_str, "id": chunk_id})
 
 
 async def _bump_access(doc_ids: list[int]) -> None:
@@ -451,46 +486,44 @@ async def search_chunks(session: AsyncSession, user: User, q: str, limit: int = 
                         library: str | None = None, project: str | None = None,
                         use_vector: bool = True,
                         include_superseded: bool = False) -> list[dict]:
-    """关键词检索（tsvector OR + ts_rank）+ trgm 相似度兜底 + 可选向量，RRF 融合。
+    """关键词检索 + 模糊兜底 + 可选向量，RRF 融合。两个后端共用同一套排序。
+
+    三路的**实现**按后端分流（见 dialect 模块）：
+      关键词  PG: tsvector + ts_rank    SQLite: FTS5 + bm25
+      模糊    PG: pg_trgm.similarity   SQLite: Python 端三元组 Jaccard
+      向量    PG: pgvector + hnsw      SQLite: Python 端暴力余弦
+    三路的**融合与加权**在这个函数里，只有一份实现 —— 那部分逻辑是被实测
+    反复校准出来的（长度归一化指数、importance 权重、PER_DOC_CAP），
+    复制一份必然分叉。
 
     默认排除被 supersedes 的文档。理由是实测踩到的问题：库里有三篇讲同一个
     项目工程结构的文档（标题相似度 0.47-0.60，小节几乎一一对应），
     检索时三篇全命中，agent 无从判断该信哪个 —— 那比没有信息更糟。
     标了 supersedes 之后旧版本退出检索，但文件还在、还能直接 memory_get 读。
     """
-    tsq = to_tsquery(q)
-    kw_rows: list[tuple] = []
-    trgm_rows: list[tuple] = []
-    conds = [Document.user_id == user.id, Document.deleted_at.is_(None)]
+    # 文档过滤条件拼成裸 SQL 片段：两端语法一致，不需要适配，
+    # 但必须由这里统一给出 —— 三路里任一路漏了条件都会把过滤掉的文档捞回来。
+    where = ["d.user_id = :uid", "d.deleted_at IS NULL"]
+    params: dict = {"uid": user.id}
     if not include_superseded:
-        conds.append(Document.superseded_by.is_(None))
+        where.append("d.superseded_by IS NULL")
     if library:
-        conds.append(Document.library == sanitize_slug(library))
+        where.append("d.library = :lib")
+        params["lib"] = sanitize_slug(library)
     if project:
-        conds.append(Document.project == project)
+        where.append("d.project = :proj")
+        params["proj"] = project
+    where_sql = " AND ".join(where)
 
-    if tsq:
-        sql = (
-            select(Chunk.id, Chunk.document_id, Chunk.seq, Chunk.heading, Chunk.content,
-                   func.ts_rank(Chunk.tsv, text(f"to_tsquery('simple', :tsq)")).label("rank"))
-            .join(Document, Document.id == Chunk.document_id)
-            .where(*conds, Chunk.tsv.op("@@")(text(f"to_tsquery('simple', :tsq)")))
-            .order_by(desc("rank")).limit(limit * 3)
-        )
-        kw_rows = (await session.execute(sql, {"tsq": tsq})).all()
-    # trgm 兜底（错别字/部分词）
-    trgm_sql = (
-        select(Chunk.id, Chunk.document_id, Chunk.seq, Chunk.heading, Chunk.content,
-               func.similarity(Chunk.content, text(":q")).label("rank"))
-        .join(Document, Document.id == Chunk.document_id)
-        .where(*conds, text("similarity(chunks.content, :q) > 0.2"))
-        .order_by(desc("rank")).limit(limit * 3)
-    )
-    trgm_rows = (await session.execute(trgm_sql, {"q": q[:2000]})).all()
+    toks = tokenize(q)
+    kw_rows = await dialect.keyword_candidates(
+        session, DB_BACKEND, toks, q, where_sql, params, limit * 3)
+    trgm_rows = await dialect.trgm_candidates(
+        session, DB_BACKEND, q, where_sql, params, limit * 3)
 
     # 第三路：向量语义检索。没配 embedding 或上游挂了就返回 None，自动降级为两路。
     # 放在这里而不是并发跑：三路里只有这一路有网络往返（实测 280-800ms），
-    # 而前两路是本地 PG 查询（个位数毫秒），并发省不下什么，反而让失败处理变复杂。
+    # 而前两路是本地查询（个位数毫秒），并发省不下什么，反而让失败处理变复杂。
     vec_rows: list[tuple] = []
     # 预算保护放在这一层而不是只靠 embed_query 内部：向量路是整条检索里唯一
     # 会碰网络的部分，超时保护必须是结构性的 —— 换 embedding 实现、
@@ -514,7 +547,7 @@ async def search_chunks(session: AsyncSession, user: User, q: str, limit: int = 
         # 长文档 chunk 多，就有更多机会挤进向量 top-N，每个 chunk 都独立贡献一份
         # RRF 分数，于是长文靠"票多"重新拿回了长度归一化刚刚抵掉的优势。
         # 实测没有这个约束时，28 chunk 的长文会把对题短文压到第二。
-        # 关键词/trgm 两路不需要这条，它们在 SQL 里就按 ts_rank 排过序，
+        # 关键词/trgm 两路不需要这条，它们在 SQL 里就按 rank 排过序，
         # 长文的多个 chunk 不会全挤在前面。
         VEC_PER_DOC = 2
         seen_doc: dict[int, int] = {}
@@ -617,6 +650,9 @@ async def semantic_search(session: AsyncSession, user: User, q: str, limit: int 
 
     library/project 过滤必须和 search_chunks 保持一致 —— 否则融合进 RRF 后
     向量路会把用户明确过滤掉的文档带回结果里。
+
+    近邻搜索本身按后端分流：PG 走 pgvector 的 hnsw 索引；
+    SQLite 没有向量索引，读出全部向量在 Python 端算余弦（见 dialect 的扫描上限）。
     """
     from .search import EMBED_AVAILABLE
     if not EMBED_AVAILABLE:
@@ -626,35 +662,22 @@ async def semantic_search(session: AsyncSession, user: User, q: str, limit: int 
     qv = await embed_query(q)
     if not qv:
         return None
-    vec_str = "[" + ",".join(f"{x:.6f}" for x in qv) + "]"
     dim = settings.embed_dim
-    # 距离表达式必须逐字匹配 hnsw 索引的定义 `(embedding::vector(<dim>))`，
-    # 否则 PG 认不出可用索引，静默退化成全表扫描 + 逐行算距离（不报错，只是慢）。
-    # embedding IS NULL 的 chunk 必须排掉：向量列是可空的（上游挂了就不写），
-    # NULL 参与排序会挤占 LIMIT 名额。
-    params: dict = {"vec": vec_str, "uid": user.id, "lim": limit}
     # superseded 过滤必须和 search_chunks 一致。漏在这里等于给旧版本开了后门：
     # 关键词路排掉了，向量路又把它捞回来融进 RRF。
-    extra = " AND d.superseded_by IS NULL"
-    # 用 CAST(:x AS text) 而不是裸 :x —— asyncpg 对无类型参数推不出类型会报
-    # AmbiguousParameterError（README 坑 1、2）
+    where = ["d.user_id = :uid", "d.deleted_at IS NULL", "d.superseded_by IS NULL"]
+    params: dict = {"uid": user.id}
+    # PG 侧用 CAST(:x AS text) 而不是裸 :x —— asyncpg 对无类型参数推不出类型会报
+    # AmbiguousParameterError（README 坑 1、2）。SQLite 侧裸参数没问题，
+    # 但统一写成 CAST 也合法，省一个分支。
     if library:
-        extra += " AND d.library = CAST(:lib AS text)"
+        where.append("d.library = CAST(:lib AS text)")
         params["lib"] = library
     if project:
-        extra += " AND d.project = CAST(:proj AS text)"
+        where.append("d.project = CAST(:proj AS text)")
         params["proj"] = project
-    sql = text(
-        f"""
-        SELECT c.id, c.document_id, c.seq, c.heading, c.content,
-               1 - (c.embedding::vector({dim}) <=> CAST(:vec AS vector({dim}))) AS score
-        FROM chunks c JOIN documents d ON d.id = c.document_id
-        WHERE d.user_id = :uid AND d.deleted_at IS NULL AND c.embedding IS NOT NULL{extra}
-        ORDER BY c.embedding::vector({dim}) <=> CAST(:vec AS vector({dim}))
-        LIMIT :lim
-        """
-    )
-    rows = (await session.execute(sql, params)).all()
+    rows = await dialect.vector_candidates(
+        session, DB_BACKEND, qv, dim, " AND ".join(where), params, limit)
     doc_ids = {r[1] for r in rows}
     docs = {d.id: d for d in (await session.execute(select(Document).where(Document.id.in_(list(doc_ids))))).scalars()}
     out = []

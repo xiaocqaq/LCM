@@ -1,9 +1,17 @@
 #!/usr/bin/env bash
-# memorys 全量验收：十四套测试（单测本地 + 其余打公网 HTTPS）+ 服务状态 + 公网端点 + Hermes 侧闭环
+# memorys 全量验收：十六套测试（单测本地 + 其余打公网 HTTPS）+ 服务状态 + 公网端点 + Hermes 侧闭环
+#
+# 本地模式（SQLite）的两套是有条件跑的：
+#   local_parity  —— 纯函数层随时可跑；端到端层要 SQLITE_BASE 有实例才比
+#   local_mode    —— 需要本地实例在跑，没有就跳过（不算失败）
+# 起本地实例：
+#   MEM_MODE=local MEM_LOCAL_HOME=/tmp/memlocal-test \
+#     .venv/bin/python -m uvicorn app.main:app --port 8650
 cd /opt/memorys || exit 1
 export PYTHONPATH=/opt/memorys
 export MEM_TEST_BASE=https://repo.xlingo.fun
 KEY=$(cat /root/.memorys-hermes-key)
+SQLITE_BASE=${SQLITE_BASE:-http://127.0.0.1:8650}
 
 run() {
   local name="$1"; shift
@@ -27,6 +35,21 @@ run rank_test           .venv/bin/python tests/rank_test.py
 run vec_search          .venv/bin/python tests/vec_search_test.py
 run links_test          .venv/bin/python tests/links_test.py
 run smoke_ready         .venv/bin/python tests/smoke_ready.py
+
+echo
+echo "===== 本地模式（SQLite）====="
+# 纯函数层 + PG 数值对照。这一套不依赖本地实例，任何时候都该绿
+run local_parity        env PG_BASE=https://repo.xlingo.fun SQLITE_BASE="$SQLITE_BASE" \
+                          .venv/bin/python tests/local_parity.py
+if curl -s -o /dev/null --max-time 3 "$SQLITE_BASE/api/health"; then
+  run local_mode        env BASE="$SQLITE_BASE" .venv/bin/python tests/local_mode_test.py
+else
+  printf '%-22s SKIP    本地实例未运行（%s）\n' "local_mode" "$SQLITE_BASE"
+fi
+
+echo
+echo "===== 向量覆盖率 ====="
+.venv/bin/python tests/backfill_vectors.py --dry-run 2>&1 | head -2
 
 echo
 echo "===== 服务 / 自启 ====="

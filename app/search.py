@@ -133,6 +133,52 @@ def expand_tokens(text: str, limit: int = 220) -> list[str]:
     return out
 
 
+_CJK_RE = re.compile(r"[\u3000-\u9fff\uf900-\ufaff\uff00-\uffef]")
+
+
+def est_tokens(s: str) -> int:
+    """估 token 数。必须**宁高估勿低估**（见下）。
+
+    系数是拿上游真实 usage.total_tokens 校准出来的，不是拍的
+    （校准脚本 tests/calib_tokens.py，12 条真实 chunk 逐条对照）。
+
+    第一版用了"CJK 1 token/字 + 其余 4 字符/token"，实测 12 条里 **10 条低估**，
+    最差 0.78（估 541 实际 649）。原因是这个库的正文里非中文部分大量是
+    代码、路径、YAML、命令行 —— 那些内容标点密集，BPE 切得很碎，
+    远不到 4 字符/token，实测在 2.4-2.9 之间。
+
+    为什么低估是危险的：低估 → 截断不足 → 请求超过模型上限 →
+    **上游不返回 400 而是挂死到 ReadTimeout**（20 秒）。而且重试策略会把
+    每条这样的 chunk 放大成 27 次超时，一次 reindex 从 0.2 秒变成 6 分钟。
+    高估的代价只是多截几十个字，检索质量略降。两者完全不对等。
+
+    现在的系数：CJK ×1.05，其余 ÷2.2。同一批 12 条实测估/实比值 1.07-1.36，
+    全部安全高估。
+    """
+    n = len(s or "")
+    cjk = len(_CJK_RE.findall(s or ""))
+    other = max(0, n - cjk)
+    return int(cjk * 1.05 + other / 2.2) + 1
+
+
+def fit_tokens(s: str, budget: int) -> str:
+    """按 token 预算截断。二分找最长的合规前缀。
+
+    为什么不能只按字符数截：同样 1000 字符，纯中文≈1000 token 而纯英文≈250，
+    一个固定的字符上限要么对中文不够安全，要么对英文浪费太多内容。
+    """
+    if est_tokens(s) <= budget:
+        return s
+    lo, hi = 0, len(s)
+    while hi - lo > 8:
+        mid = (lo + hi) // 2
+        if est_tokens(s[:mid]) <= budget:
+            lo = mid
+        else:
+            hi = mid
+    return s[:lo]
+
+
 EMBED_AVAILABLE = bool(settings.embed_api_base and settings.embed_api_key)
 
 
@@ -167,8 +213,18 @@ async def embed_texts(texts: list[str], timeout: float | None = None,
     分批提交：上游有批量上限（阿里云百炼 25，超一条整批 400），
     一次 reindex 的 chunk 数远超这个值。
 
-    重试策略是实测逼出来的：阿里云会**随机** ReadTimeout，跟内容、长度、批量都无关
-    （同一条 chunk 单独重发也可能超时，而更长的下一条却正常）。所以：
+    **每条输入都按 token 预算截断**（settings.embed_max_tokens）。这一条不是
+    优化而是必须 —— 实测 qwen3.7-text-embedding-flash 的 512 token 上限
+    超限后不返回 400 而是**挂死到 ReadTimeout**：
+
+        1015 字 → 200，513 token，221ms
+        1060 字 → ReadTimeout（重试 3 次全超时，确定性的）
+
+    所以曾经的"随机 ReadTimeout"其实根本不随机：它是长 chunk 撞上限，
+    而重试策略把每条这样的 chunk 都放大成 (1 整批 + 1 整批 + 25 单条) 次超时，
+    一次 reindex 就从 0.2 秒变成 6 分钟。修掉截断之后重试策略才有意义。
+
+    重试策略（保留，用于真正的网络抖动）：
       1. 整批失败先原样重试
       2. 仍失败就拆成单条逐个要 —— 一批 25 条里通常只有 1-2 条踩雷，
          拆开后其余 23 条能正常拿到，比整批放弃划算得多
@@ -216,7 +272,10 @@ async def embed_texts(texts: list[str], timeout: float | None = None,
     out: list[list[float] | None] = []
     async with httpx.AsyncClient(timeout=timeout or settings.embed_timeout) as client:
         for i in range(0, len(texts), bs):
-            batch = [t[: settings.embed_max_chars] for t in texts[i : i + bs]]
+            # 双重上限：token 预算是硬约束（超了上游挂死），字符数是兜底
+            # （防止估算失灵时发出一个巨大的请求体）
+            batch = [fit_tokens(t, settings.embed_max_tokens)[: settings.embed_max_chars]
+                     for t in texts[i : i + bs]]
             got: list[list[float]] | None = None
             for attempt in range(retries + 1):
                 try:

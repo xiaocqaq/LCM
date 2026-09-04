@@ -1,10 +1,14 @@
-"""数据模型。md 文件是 source of truth，DB 只做索引与元数据。"""
+"""数据模型。md 文件是 source of truth，DB 只做索引与元数据。
+
+列类型走 coltypes 的方言变体（JSONB/JSON、TSVECTOR/Text），
+所以同一套模型能在 PostgreSQL 和 SQLite 上建表。
+"""
 from datetime import datetime
 
 from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, func
-from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column
 
+from .coltypes import BigIntPK, JSONType, TSVectorType
 from .db import Base
 
 
@@ -41,14 +45,14 @@ class Document(Base):
     title: Mapped[str] = mapped_column(String(256))
     md_type: Mapped[str] = mapped_column(String(32), default="fact")  # project_summary/decision/preference/howto/glossary/fact
     project: Mapped[str] = mapped_column(String(128), default="")
-    tags: Mapped[list] = mapped_column(JSONB, default=list)
+    tags: Mapped[list] = mapped_column(JSONType, default=list)
     importance: Mapped[int] = mapped_column(Integer, default=3)
     source: Mapped[str] = mapped_column(String(64), default="")
     content: Mapped[str] = mapped_column(Text, default="")  # frontmatter 之后的正文
     # 文档间关系。借自 graph-memory 的边模型，但只保留能改变检索行为的那几种，
     # 且存在 frontmatter 里（md 仍是 source of truth，图关系不另立数据源）。
     # 形如 [{"type": "supersedes", "target": "slug-or-title", "note": "为什么"}]
-    links: Mapped[list] = mapped_column(JSONB, default=list)
+    links: Mapped[list] = mapped_column(JSONType, default=list)
     # 被别的文档 supersedes 时置位。检索与 bootstrap 默认跳过，
     # 但文件还在、还能直接读 —— 「过时」不等于「删除」。
     superseded_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -56,7 +60,7 @@ class Document(Base):
     # 真正被反复读到的才是有用的知识。graph-memory 用 validatedCount 做同一件事。
     access_count: Mapped[int] = mapped_column(Integer, default=0)
     last_accessed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    meta: Mapped[dict] = mapped_column(JSONB, default=dict)  # frontmatter 扩展字段原样保留
+    meta: Mapped[dict] = mapped_column(JSONType, default=dict)  # frontmatter 扩展字段原样保留
     rel_path: Mapped[str] = mapped_column(String(300))  # 相对用户根目录，如 main/xxx.md
     content_hash: Mapped[str] = mapped_column(String(64), default="")
     created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -70,13 +74,17 @@ class Document(Base):
 
 class Chunk(Base):
     __tablename__ = "chunks"
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    id: Mapped[int] = mapped_column(BigIntPK, primary_key=True)
     document_id: Mapped[int] = mapped_column(ForeignKey("documents.id", ondelete="CASCADE"))
     seq: Mapped[int] = mapped_column(Integer, default=0)
     heading: Mapped[str] = mapped_column(String(256), default="")
     content: Mapped[str] = mapped_column(Text, default="")
-    tsv: Mapped[object] = mapped_column(TSVECTOR, nullable=True)
-    embedding: Mapped[object] = mapped_column(Text, nullable=True)  # 建为 text，启动时 ALTER 成 vector(dim)
+    tsv: Mapped[object] = mapped_column(TSVectorType, nullable=True)
+    # 向量。两端都建成 Text 存 "[0.1,0.2,…]"：
+    #   PG    启动时 ALTER 成 vector(dim)，走 pgvector 的 hnsw 近邻索引
+    #   SQLite 保持 Text，检索时读出来在 Python 侧算余弦（见 dialect.vector_candidates）
+    # 那个字面量同时是 pgvector 字面量和合法 JSON，所以两端不需要两套编码。
+    embedding: Mapped[object] = mapped_column(Text, nullable=True)
     __table_args__ = (
         Index("idx_chunks_doc", "document_id", "seq"),
     )

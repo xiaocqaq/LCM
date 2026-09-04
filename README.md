@@ -22,13 +22,24 @@
 
 ## 快速开始
 
+### 本地跑（零配置）
+
 ```bash
-git clone https://github.com/xiaocqaq/LCM.git memorys
-cd memorys
+git clone https://github.com/xiaocqaq/LCM.git memorys && cd memorys
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+.venv/bin/python -m app.local
+```
 
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
+浏览器自动打开 `http://127.0.0.1:8650/`，数据落在 `~/.memorys/`。
+不需要 PostgreSQL、不需要填任何配置、不需要建 API Key。
+SQLite 自动建，JWT secret 自动生成并持久化，MCP 免鉴权直连。
 
+详见 [docs/LOCAL.md](docs/LOCAL.md) —— 包括两端检索一致性的实测数据、
+SQLite 特有的坑、以及什么时候该换回 PostgreSQL。
+
+### 服务器部署
+
+```bash
 cp .env.example .env
 # 编辑 .env：至少填 MEM_DATABASE_URL 和 MEM_JWT_SECRET
 #   openssl rand -hex 32   # 生成 JWT secret
@@ -47,6 +58,27 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;   -- 模糊匹配兜底，必需
 
 缺 `MEM_DATABASE_URL` 或 `MEM_JWT_SECRET` 会直接启动失败并提示 —— 
 这是刻意的，空 secret 签出的 JWT 谁都能伪造，而服务照样返回 200。
+
+### 两种模式的关系
+
+**同一个程序，同一套业务代码**，不是两个分支也不是精简版：
+
+| | 服务器模式 | 本地模式 |
+|---|---|---|
+| 数据库 | PostgreSQL + pgvector | SQLite（自动建） |
+| 关键词检索 | `tsvector` + `ts_rank` | FTS5 + `bm25()` |
+| 模糊兜底 | `pg_trgm`，GIN 索引 | Python 三元组 Jaccard |
+| 向量 | pgvector + hnsw 索引 | Python 暴力余弦 |
+| 登录 | 复用上游账号体系 | 免登录单用户 |
+| 必填配置 | 2 项 | 0 项 |
+
+方言差异全部收在 `app/dialect.py`，**检索的融合与加权只有一份实现** ——
+那部分逻辑（RRF 三路等权、长度归一化指数 0.35、importance ±10%、PER_DOC_CAP=2）
+是被实测反复校准出来的，复制一份必然分叉。
+
+一致性是实测过的：`tests/local_parity.py` 拿真实 PG 的 `similarity()` 逐条对照
+Python 复刻的数值（6 组全部吻合到 1e-6），再用同一批文档和查询对比两端结果，
+**top1 一致率 100%**。
 
 ## MCP 接入
 
@@ -198,8 +230,42 @@ hnsw 索引建在固定维度的表达式上，填错不报错而是索引静默
 只给**内容真的变了**的 chunk 调 embedding 上游。
 
 这不是优化而是必须：一次全量 reindex 要给每个 chunk 调一次上游，
-而上游会随机 ReadTimeout（重试等 30s+）。实测 23 篇文档全量 reindex 超过 7 分钟，
+而超限的 chunk 会挂死到 ReadTimeout（见下节）。实测 23 篇文档全量 reindex 超过 7 分钟，
 直接把 `POST /api/v1/sync` 打成超时。改成复用后同样的 sync 是 **0.18 秒**。
+
+### 上游 embedding 的 token 上限：不是"随机超时"
+
+一度以为阿里云百炼会**随机** ReadTimeout（跟内容、长度、批量都无关）。
+后来做了二分定位，发现它完全是确定性的 —— `qwen3.7-text-embedding-flash`
+的上限是 **512 token**，超限后**不返回 400 而是挂住到 ReadTimeout**：
+
+```
+1015 字 → HTTP 200,  usage.total_tokens=513, 221ms
+1019 字 → HTTP 200,  usage.total_tokens=503, 244ms
+1060 字 → ReadTimeout（同一条重试 3 次全超时；截短 20 字立刻 200）
+```
+
+之所以看着"随机"，是因为 chunk 长度分布跨过了这条线，而重试策略把每条超限的
+chunk 放大成 27 次超时（整批 ×2 + 拆开单条 ×25）。所以修法不是加重试，
+而是**按 token 预算截断**（`fit_tokens()`）。
+
+token 估算器必须**宁高估勿低估**，系数是拿真实 `usage.total_tokens` 校准的
+（`tests/calib_tokens.py`，12 条真实 chunk 逐条对照）：
+
+| 版本 | 系数 | 12 条实测估/实比值 | 结果 |
+|---|---|---|---|
+| 第一版 | CJK 1/字，其余 4 字符/token | **0.78 – 1.08** | 10 条低估 ❌ |
+| 现在 | CJK ×1.05，其余 ÷2.2 | 1.11 – 1.51 | 全部安全 ✅ |
+
+第一版低估的原因：非中文部分大量是代码、路径、YAML、命令行，标点密集、
+BPE 切得很碎，实测只有 2.4-2.9 字符/token，远不到 4。
+
+修完的效果：23 条历来拿不到向量的长 chunk **23/23 全部成功**，
+向量覆盖率 `92.3% → 100%`，补全部耗时 6.2 秒。
+`text-embedding-v4` 可以放宽到 8192 token（实测 8000 字正常返回）。
+
+补历史遗留的缺失向量用 `tests/backfill_vectors.py`（sync 只处理内容变过的文档，
+内容没变但缺向量的它不管 —— 那是刻意的，否则每次 sync 都要为历史失败重试一遍）。
 
 复用的键是 chunk 正文本身，**不是 seq** —— 在文档中间加一节会让后面所有 chunk 的
 seq 整体位移，按 seq 复用等于把向量和内容错配，检索会返回莫名其妙的结果。
@@ -327,7 +393,7 @@ bash tests/cleanup.sh           # 清测试残留
 
 ## 踩过的坑
 
-留在这里因为它们都花过时间，且换个人做还会再踩一次。
+50 条，留在这里因为它们都花过时间，且换个人做还会再踩一次。
 
 ### SQLAlchemy / asyncpg
 
@@ -362,43 +428,48 @@ bash tests/cleanup.sh           # 清测试残留
     → 每个 chunk 独立贡献 RRF 分数 → 长文靠"票多"拿回长度归一化刚抵掉的优势
 17. **写入侧和查询侧的超时预算必须分开**，且保护要放在融合层用 `asyncio.wait_for` 兜，
     不能只靠 embedding 函数内部 —— 换实现时才不会漏
-18. **上游 embedding 会随机超时**：同一条文本单独重发也可能超时，而更长的下一条正常。
-    所以要三级降级：整批重试 → 拆单条 → 才认输。实测覆盖率从 0/28 变成 25/28
+18. **上游 embedding 的"随机超时"其实是确定性的 token 上限**：
+    flash 模型 512 token，超限后不返回 400 而是挂死到 ReadTimeout。
+    看着随机是因为 chunk 长度跨过那条线，而重试策略把每条超限 chunk 放大成 27 次超时。
+    修法是按 token 预算截断，不是加重试。三级降级保留，用于真正的网络抖动
+19. **token 估算器必须宁高估勿低估**，且系数要拿真实 `usage.total_tokens` 校准。
+    "非中文 4 字符/token" 那个常识值在代码/路径/YAML 密集的文本上不成立
+    （实测 2.4-2.9），照抄会低估 22%，直接导致请求挂死
 
 ### bootstrap 预算
 
-19. 装箱循环超额要 `break` 不是 `continue`。`continue` 会让排序失效
+20. 装箱循环超额要 `break` 不是 `continue`。`continue` 会让排序失效
     （收的是"能塞进缝隙的"而非"排在前面的"）
-20. 别写 `if used + cost > budget and picked: continue` —— `and picked` 短路
+21. 别写 `if used + cost > budget and picked: continue` —— `and picked` 短路
     使第一篇永远无条件全量收录，预算 100 也返回 3430 tokens
-21. 别把"因单篇长度上限截断"当成"预算耗尽"，要用两个变量区分
-22. `digest` 字段也要守预算，它是给 agent 直接塞进开场的
+22. 别把"因单篇长度上限截断"当成"预算耗尽"，要用两个变量区分
+23. `digest` 字段也要守预算，它是给 agent 直接塞进开场的
 
 ### git 与数据
 
-23. **往别的分支写文件不要用 `checkout` 来回切**：要翻动两次工作区、重建两次索引，
+24. **往别的分支写文件不要用 `checkout` 来回切**：要翻动两次工作区、重建两次索引，
     中途失败会把用户留在错误分支。用 plumbing：
     `hash-object` → 临时 `GIT_INDEX_FILE` + `read-tree`/`update-index` →
     `write-tree` → `commit-tree` → `update-ref`。写完 `git status` 仍为空
-24. **写非当前分支时不要落盘也不要进 DB**：磁盘 md 和 PG 索引都是"当前分支"的平铺视图，
+25. **写非当前分支时不要落盘也不要进 DB**：磁盘 md 和 PG 索引都是"当前分支"的平铺视图，
     混写会让工作区变成两分支混合体、检索返回不存在的文档
-25. 切分支/合并后一定要 reindex
-26. 分支名会拼进 git 命令，**必须白名单校验**（`--force`、`a..b`、`x@{1}` 这些都要拒）
-27. **软删除时要一并删 chunk**：它们检索不到（查询都带 `deleted_at IS NULL`），
+26. 切分支/合并后一定要 reindex
+27. 分支名会拼进 git 命令，**必须白名单校验**（`--force`、`a..b`、`x@{1}` 这些都要拒）
+28. **软删除时要一并删 chunk**：它们检索不到（查询都带 `deleted_at IS NULL`），
     但会让"多少 chunk 有向量"这类统计失真。chunk 是可重建的派生数据
-28. `_reindex_document(do_embed=False)` 会**丢掉已有向量** —— 它是先 DELETE 整行再重插。
+29. `_reindex_document(do_embed=False)` 会**丢掉已有向量** —— 它是先 DELETE 整行再重插。
     只想刷关键词索引就用 `tests/reindex_lex_only.py`
-29. **读路径里的写操作要用独立 session**。给检索命中的文档累加 `access_count` 时
+30. **读路径里的写操作要用独立 session**。给检索命中的文档累加 `access_count` 时
     挂在调用方 session 上，UPDATE 会随请求结束被丢掉 —— FastAPI 的 `get_session`
     从不 commit。而且不该为了记账把检索变成写事务（调用方可能在更大的只读逻辑里）。
     记账失败也绝不能影响检索本身，整段包 try。
-30. **关系必须能撤销，否则会造成永久隐身**。`supersedes` 让目标退出检索，
+31. **关系必须能撤销，否则会造成永久隐身**。`supersedes` 让目标退出检索，
     那么：改 links 要先清旧标记再重建；删除"取代者"要恢复被取代者；
     从磁盘 sync 要整体重建而不是增量改。漏任何一条，都会出现
     "某篇文档搜不到了但看不出为什么"。
-31. **sync 时 links 要在全部文档进 DB 之后再统一解析**。关系可能指向本次 sync
+32. **sync 时 links 要在全部文档进 DB 之后再统一解析**。关系可能指向本次 sync
     里更靠后才扫到的文件，边扫边解析会有一半解析不出来。
-32. **启动期 DDL 必须设 `lock_timeout`**（本项目最难查的一次故障）。
+33. **启动期 DDL 必须设 `lock_timeout`**（本项目最难查的一次故障）。
     `ALTER TABLE` 要 ACCESS EXCLUSIVE 锁，只要有一个连接还占着该表的锁
     （比如一个 `idle in transaction` 的孤儿连接），ALTER 就排队等待 ——
     而 **PG 的锁队列是 FIFO：一个待授予的 ACCESS EXCLUSIVE 会挡住它后面
@@ -409,36 +480,66 @@ bash tests/cleanup.sh           # 清测试残留
     再用 `pg_blocking_pids()` 找源头。
     修法：`SET lock_timeout = '3s'` + 幂等 DDL 先查状态再改
     （`attstorage` 已是 `e` 就别再 ALTER）。
-33. **asyncpg 把 `"char"` 类型返回成 bytes**。`pg_attribute.attstorage` 拿到的是
+34. **asyncpg 把 `"char"` 类型返回成 bytes**。`pg_attribute.attstorage` 拿到的是
     `b'e'` 而不是 `'e'`，直接和字符串比永远不等 → "先查再改"的优化失效，
     每次启动照样抢一次表锁。
-34. **诊断脚本一定要 `python -u` 或 `print(flush=True)`**。前几轮排查这个死锁时
+35. **诊断脚本一定要 `python -u` 或 `print(flush=True)`**。前几轮排查这个死锁时
     脚本卡在 PG 等锁上，stdout 缓冲导致日志一直是空的，
     看起来像"脚本自己挂了"，白绕了两圈。
 
 ### 测试
 
-29. 测试断言别依赖失败文案，上游改个措辞就红
-30. 测试标题要唯一化（拼时间戳），否则并行跑互相干扰
-31. **反向用例不能断言"零结果"**：向量检索的最近邻永远有 N 条，
+36. 测试断言别依赖失败文案，上游改个措辞就红
+37. 测试标题要唯一化（拼时间戳），否则并行跑互相干扰
+38. **反向用例不能断言"零结果"**：向量检索的最近邻永远有 N 条，
     「孜然羊肉」也会返回技术文档。判据改成分数分布 —— 无关查询 top1
     要低于正向 top1 的最低分
-32. 反向断言别打真实库：库内容会变，「注意」这类通用词会被正常命中（那是对的行为）
+39. 反向断言别打真实库：库内容会变，「注意」这类通用词会被正常命中（那是对的行为）
 
 ### UI
 
-33. **对比度要算不要看**。写脚本取 `computedStyle` 算 WCAG 比值。
+40. **对比度要算不要看**。写脚本取 `computedStyle` 算 WCAG 比值。
     目测会系统性高估细描边和小字号元素，放大截图看更会
-34. **别用半透明色承载语义**。alpha 的实际对比度取决于背后是什么，
+41. **别用半透明色承载语义**。alpha 的实际对比度取决于背后是什么，
     在基础表面刚好达标的值换到卡片/hover 态就失效
-35. 字号越小颜色要越深。分组标题一度用最浅色配最小字号，方向反了
-36. 主题初始化脚本必须放 `<head>`，放 `body` 会先渲染一帧默认主题再跳变
+42. 字号越小颜色要越深。分组标题一度用最浅色配最小字号，方向反了
+43. 主题初始化脚本必须放 `<head>`，放 `body` 会先渲染一帧默认主题再跳变
+
+### SQLite（本地模式）
+
+44. **`BIGINT PRIMARY KEY` 在 SQLite 上不自增**。只有 `INTEGER PRIMARY KEY`
+    是 rowid 的别名。`chunks.id` 声明成 BigInteger 时插入直接
+    `NOT NULL constraint failed: chunks.id` —— 报错完全没提类型不对，
+    看着像代码忘了传 id。修法 `BigInteger().with_variant(Integer(), "sqlite")`
+45. **FTS5 虚拟表没有外键级联**。删 chunk 不会带走它的 FTS 行，
+    漏了显式删除会让检索 JOIN 不上而静默少结果，`count(*)` 又对不上。
+    而且**必须先删 FTS 行再删 chunk** —— FTS 行是按
+    `chunk_id IN (SELECT id FROM chunks WHERE …)` 反查的，chunk 先没了子查询就空
+46. **PRAGMA 是连接级不是数据库级**。`foreign_keys` 默认关闭，而模型依赖
+    `ondelete="CASCADE"`。在 lifespan 里设一次只对那条连接有效，
+    池扩容后拿到的新连接又是 OFF —— 孤儿行只在"连接池扩容之后"出现，极难复现。
+    要挂 `event.listens_for(engine.sync_engine, "connect")`
+47. **`with_variant` 的基类型必须是通用的那个**。写成
+    `JSONB().with_variant(JSON, "sqlite")` 在 SQLite 上仍会编译 JSONB 而报错 ——
+    variant 只在命中的方言上替换，没命中时用基类型
+48. **本地模式不能读项目根的 `.env`**。那里面是生产 PG 连接串和生产 secret，
+    读了就等于本地随手测试直接改生产数据，而界面上看不出区别。
+    只读 `~/.memorys/.env`
+49. **`embedding::text` 转换在 SQLite 上报错**。PG 上那列是 `vector(dim)`，
+    读回文本要 `::text`；SQLite 上本来就是 TEXT，加转换是语法错误
+50. **单用户模式要自己建 git repo**。server 模式是在登录时建的，本地不走登录 ——
+    漏了这步后果很隐蔽：md 确实落盘、写入一切正常，但 `try_commit_all` 内部
+    catch 掉所有异常，git 提交静默不发生，版本历史永远是空的
 
 ## 技术栈
 
-Python 3.11 / FastAPI / SQLAlchemy(asyncpg) / PostgreSQL + pgvector + pg_trgm /
-jieba / MCP SDK（钉 `<2`，2.x 把 `FastMCP` 改名 `MCPServer`）/
-单文件 HTML + 原生 JS（无构建步骤）
+Python 3.11 / FastAPI / SQLAlchemy(asyncio) / MCP SDK（钉 `<2`，2.x 把
+`FastMCP` 改名 `MCPServer`）/ jieba / 单文件 HTML + 原生 JS（无构建步骤）
+
+存储层两套后端，同一套 ORM 模型（列类型走 `app/coltypes.py` 的方言变体）：
+
+- **服务器**：PostgreSQL + asyncpg + pgvector + pg_trgm
+- **本地**：SQLite + aiosqlite + FTS5（`app/dialect.py` 里的 Python 侧模糊/向量实现）
 
 ## License
 
@@ -500,8 +601,8 @@ memorys 的输入不是对话流水 —— 是 agent 或人**已经想清楚了�
 
 真正值得借的只有两个思路，都对应实测看到的具体问题：
 
-1. **版本关系**（对应它的 `PATCHES` 边 + 向量去重）→ `supersedes`
-2. **客观累积的重要度**（对应它的 `validatedCount`）→ `access_count`
+2. **版本关系**（对应它的 `PATCHES` 边 + 向量去重）→ `supersedes`
+3. **客观累积的重要度**（对应它的 `validatedCount`）→ `access_count`
 
 ### access_count：手填 importance 的补充
 

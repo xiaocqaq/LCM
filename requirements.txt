@@ -2,6 +2,9 @@ fastapi>=0.115
 uvicorn[standard]>=0.30
 sqlalchemy[asyncio]>=2.0
 asyncpg>=0.29
+# 本地模式（MEM_MODE=local）的 SQLite 异步驱动。
+# 服务器模式用不到，但装上不到 100KB，不值得为它拆一个 extras
+aiosqlite>=0.20
 pgvector>=0.3
 pydantic>=2.7
 pydantic-settings>=2.2

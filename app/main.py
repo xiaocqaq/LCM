@@ -1,4 +1,11 @@
-"""FastAPI 主应用：REST API + MCP（streamable HTTP）+ Web UI。"""
+"""FastAPI 主应用：REST API + MCP（streamable HTTP）+ Web UI。
+
+两种部署形态共用这一个 app：
+  server 模式  PostgreSQL + 上游账号体系 + nginx 反代（见 deploy/）
+  local  模式  SQLite + 单用户免登录 + 只听 127.0.0.1（入口在 app/local.py）
+差异集中在 config（MEM_MODE）、dialect（SQL 方言）、auth（是否放开鉴权）三处，
+路由和业务逻辑完全一样。
+"""
 import subprocess
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -9,10 +16,11 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from . import dialect
 from . import service
 from . import links as links_mod
 from .mcp_server import mcp
-from .config import settings
+from .config import DB_BACKEND, IS_LOCAL, settings
 from .db import SessionLocal, get_session, engine
 from .mdstore import user_root
 from .models import ApiKey, Base, Document, User
@@ -23,86 +31,99 @@ STATIC_DIR = Path(__file__).parent / "static"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 建表（幂等）
+    # 建表（幂等）。两个后端共用同一套 ORM 模型（列类型走 coltypes 的方言变体）。
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        # DDL 必须设 lock_timeout。
-        #
-        # 这里踩过一次线上级别的坑：下面的 ALTER TABLE 需要 ACCESS EXCLUSIVE 锁，
-        # 只要有任何一个连接还占着 chunks 的锁（比如一个 idle in transaction 的
-        # 孤儿连接），ALTER 就会排队等待 —— 而 PG 的锁队列是 FIFO：
-        # 一个**待授予**的 ACCESS EXCLUSIVE 会把它后面所有对该表的读写全部挡住。
-        # 结果是整张 chunks 表连 SELECT 都做不了，检索、reindex、sync 全部挂死，
-        # 表面症状是"请求超时"，完全看不出跟启动期 DDL 有关。
-        #
-        # 3 秒拿不到锁就放弃：这些 DDL 全是幂等的补列/建索引，
-        # 这次没做成下次启动会再试，绝不值得拿整张表的可用性去换。
-        await conn.execute(text("SET lock_timeout = '3s'"))
-
-        # 索引与列调整（幂等）
-        for stmt in [
-            "CREATE INDEX IF NOT EXISTS idx_chunks_tsv ON chunks USING gin(tsv)",
-            "CREATE INDEX IF NOT EXISTS idx_chunks_trgm ON chunks USING gin(content gin_trgm_ops)",
-            "CREATE INDEX IF NOT EXISTS idx_documents_user_project ON documents(user_id, project) WHERE deleted_at IS NULL",
-            # 关系与热度字段。create_all 只建新表不改已有表，所以老库要靠这几句补列。
-            # 用 IF NOT EXISTS 保持幂等，比引 alembic 轻 —— 这个项目的 schema
-            # 变动是加列级别的，上迁移框架的维护成本大于收益。
-            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS links JSONB DEFAULT '[]'::jsonb",
-            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS superseded_by INTEGER",
-            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS access_count INTEGER DEFAULT 0",
-            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS last_accessed_at TIMESTAMPTZ",
-            # 检索每次都带 superseded_by IS NULL，走部分索引比全表过滤便宜
-            "CREATE INDEX IF NOT EXISTS idx_documents_not_superseded "
-            "ON documents(user_id) WHERE deleted_at IS NULL AND superseded_by IS NULL",
-        ]:
-            try:
-                await conn.execute(text(stmt))
-            except Exception:
-                pass
-
-        # embedding 列的 TOAST 策略：向量是大值，EXTERNAL 关掉压缩省 CPU。
-        # 先查再改 —— 无条件 ALTER 每次启动都要抢 ACCESS EXCLUSIVE 锁，
-        # 而这个设置只需要生效一次。
-        try:
-            cur = (await conn.execute(text(
-                "SELECT attstorage FROM pg_attribute "
-                "WHERE attrelid = 'chunks'::regclass AND attname = 'embedding'"
-            ))).scalar()
-            # asyncpg 把 pg_attribute.attstorage（内部类型 "char"）返回成 bytes，
-            # 直接和字符串 "e" 比会永远不等 → 每次启动都白抢一次表锁。
-            if isinstance(cur, (bytes, bytearray)):
-                cur = cur.decode()
-            if cur and cur != "e":   # 'e' = EXTERNAL
-                await conn.execute(text(
-                    "ALTER TABLE chunks ALTER COLUMN embedding SET STORAGE EXTERNAL"))
-        except Exception:
-            pass
-
-        # hnsw 索引维度必须跟 settings.embed_dim 一致，且写死在索引定义里。
-        # 换模型换维度时旧索引会静默失效（表达式不匹配，PG 直接不用它，退化成全表扫描
-        # 且不报错），所以这里按维度命名索引，并把不同维度的旧索引删掉。
-        dim = settings.embed_dim
-        try:
-            await conn.execute(text("SELECT 1 FROM chunks LIMIT 1"))
-            rows = await conn.execute(text(
-                "SELECT indexname FROM pg_indexes "
-                "WHERE tablename='chunks' AND indexname LIKE 'idx_chunks_embedding%'"
-            ))
-            keep = f"idx_chunks_embedding_{dim}"
-            for (name,) in rows.fetchall():
-                if name != keep:
-                    await conn.execute(text(f'DROP INDEX IF EXISTS "{name}"'))
-            await conn.execute(text(
-                f"CREATE INDEX IF NOT EXISTS {keep} ON chunks "
-                f"USING hnsw((embedding::vector({dim})) vector_cosine_ops)"
-            ))
-        except Exception:
-            pass
+        if DB_BACKEND == dialect.PG:
+            await _init_pg(conn)
+        else:
+            await _init_sqlite(conn)
     # MCP streamable HTTP 需要在应用生命周期内跑起 task group
     from .mcp_app import session_manager
     async with session_manager.run():
         yield
     await engine.dispose()
+
+
+async def _init_pg(conn) -> None:
+    """PostgreSQL 的启动期 DDL。"""
+    # DDL 必须设 lock_timeout。
+    #
+    # 这里踩过一次线上级别的坑：下面的 ALTER TABLE 需要 ACCESS EXCLUSIVE 锁，
+    # 只要有任何一个连接还占着 chunks 的锁（比如一个 idle in transaction 的
+    # 孤儿连接），ALTER 就会排队等待 —— 而 PG 的锁队列是 FIFO：
+    # 一个**待授予**的 ACCESS EXCLUSIVE 会把它后面所有对该表的读写全部挡住。
+    # 结果是整张 chunks 表连 SELECT 都做不了，检索、reindex、sync 全部挂死，
+    # 表面症状是"请求超时"，完全看不出跟启动期 DDL 有关。
+    #
+    # 3 秒拿不到锁就放弃：这些 DDL 全是幂等的补列/建索引，
+    # 这次没做成下次启动会再试，绝不值得拿整张表的可用性去换。
+    await conn.execute(text("SET lock_timeout = '3s'"))
+
+    for stmt in dialect.PG_DDL:
+        try:
+            await conn.execute(text(stmt))
+        except Exception:
+            pass
+
+    # embedding 列的 TOAST 策略：向量是大值，EXTERNAL 关掉压缩省 CPU。
+    # 先查再改 —— 无条件 ALTER 每次启动都要抢 ACCESS EXCLUSIVE 锁，
+    # 而这个设置只需要生效一次。
+    try:
+        cur = (await conn.execute(text(
+            "SELECT attstorage FROM pg_attribute "
+            "WHERE attrelid = 'chunks'::regclass AND attname = 'embedding'"
+        ))).scalar()
+        # asyncpg 把 pg_attribute.attstorage（内部类型 "char"）返回成 bytes，
+        # 直接和字符串 "e" 比会永远不等 → 每次启动都白抢一次表锁。
+        if isinstance(cur, (bytes, bytearray)):
+            cur = cur.decode()
+        if cur and cur != "e":   # 'e' = EXTERNAL
+            await conn.execute(text(
+                "ALTER TABLE chunks ALTER COLUMN embedding SET STORAGE EXTERNAL"))
+    except Exception:
+        pass
+
+    # hnsw 索引维度必须跟 settings.embed_dim 一致，且写死在索引定义里。
+    # 换模型换维度时旧索引会静默失效（表达式不匹配，PG 直接不用它，退化成全表扫描
+    # 且不报错），所以这里按维度命名索引，并把不同维度的旧索引删掉。
+    dim = settings.embed_dim
+    try:
+        await conn.execute(text("SELECT 1 FROM chunks LIMIT 1"))
+        rows = await conn.execute(text(
+            "SELECT indexname FROM pg_indexes "
+            "WHERE tablename='chunks' AND indexname LIKE 'idx_chunks_embedding%'"
+        ))
+        keep = f"idx_chunks_embedding_{dim}"
+        for (name,) in rows.fetchall():
+            if name != keep:
+                await conn.execute(text(f'DROP INDEX IF EXISTS "{name}"'))
+        await conn.execute(text(
+            f"CREATE INDEX IF NOT EXISTS {keep} ON chunks "
+            f"USING hnsw((embedding::vector({dim})) vector_cosine_ops)"
+        ))
+    except Exception:
+        pass
+
+
+async def _init_sqlite(conn) -> None:
+    """SQLite 的启动期 DDL。
+
+    跟 PG 的差异不只是语法：
+      - 没有 ADD COLUMN IF NOT EXISTS → 先读 pragma 再补
+      - 关键词索引是独立的 FTS5 虚拟表，不是 chunks 的一列
+      - 不需要 lock_timeout（SQLite 锁的是整个库，靠 busy_timeout 处理）
+    """
+    added = await dialect.sqlite_add_missing_columns(conn)
+    if added:
+        # 补列必须让人看见。静默补列出问题时无从排查，
+        # 而这类操作一辈子只发生一次（老库升级），日志成本可以忽略。
+        print(f"[memorys] SQLite 补列：{', '.join(added)}", flush=True)
+    for stmt in dialect.SQLITE_DDL:
+        try:
+            await conn.execute(text(stmt))
+        except Exception as e:
+            print(f"[memorys] SQLite DDL 失败（已跳过）：{stmt[:60]}… {e}", flush=True)
 
 
 # 不要用 root_path：它会让 Starlette 的 mount 匹配也带上前缀，
@@ -394,10 +415,16 @@ async def bootstrap(project: str | None = None, token_budget: int = 4000,
 # ---------- 磁盘同步 / GitHub ----------
 @app.post("/api/v1/sync")
 async def sync(payload: dict | None = None, ctx: AuthContext = Depends(auth), session: AsyncSession = Depends(get_session)):
-    """磁盘→DB 重建索引；payload.pull=true 时先 git pull。"""
+    """磁盘→DB 重建索引；action=pull 时先 git pull；action=rebuild_fts 只重建关键词索引。"""
     action = (payload or {}).get("action") or "reindex"
     root = user_root(settings.data_dir, ctx.user.id)
     pulled = None
+    if action == "rebuild_fts":
+        # 只 SQLite 需要：FTS5 是独立虚拟表，手工改过 db 文件或删过表之后
+        # 它可能跟 chunks 不一致。PG 侧 tsv 是 chunks 的一列，不会漂移，返回 0。
+        n = await dialect.rebuild_fts(session, DB_BACKEND, service.chunk_lexemes)
+        await session.commit()
+        return {"rebuilt_fts": n, "backend": DB_BACKEND}
     if action == "pull":
         # 走 gitsvc：远端和分支都是按用户算的，裸 git pull 不知道该拉哪个分支
         from . import gitsvc
@@ -505,10 +532,35 @@ async def branch_delete(name: str, force: bool = False, ctx: AuthContext = Depen
         raise HTTPException(400, detail=str(e))
 
 
-# ---------- 健康检查 ----------
+# ---------- 健康检查 / 系统信息 ----------
 @app.get("/api/health")
 async def health():
     return {"ok": True, "service": "memorys"}
+
+
+@app.get("/api/v1/system")
+async def system_info(ctx: AuthContext = Depends(auth),
+                      session: AsyncSession = Depends(get_session)):
+    """运行形态与检索能力自检。
+
+    这个端点存在的理由：本地模式和服务器模式的检索**行为一致但实现不同**
+    （FTS5/bm25 vs tsvector/ts_rank，Python 暴力余弦 vs hnsw 索引）。
+    用户报"本地搜得比服务器慢"或"结果不一样"时，第一件事是看这里，
+    而不是去猜数据有没有同步。
+    """
+    caps = await dialect.capabilities(session, DB_BACKEND)
+    return {
+        "mode": "local" if IS_LOCAL else "server",
+        "auth": {"via": ctx.via, "open": bool(IS_LOCAL and settings.local_open)},
+        "search": caps,
+        "vector": {
+            "configured": bool(settings.embed_api_key and settings.embed_api_base),
+            "model": settings.embed_model if settings.embed_api_key else None,
+            "dim": settings.embed_dim,
+        },
+        "storage": {"data_dir": settings.data_dir},
+        "upstream": settings.upstream_base or None,
+    }
 
 
 # ---------- MCP ----------
