@@ -4,6 +4,19 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>memorys · AI 知识库</title>
+<!--
+  标签页图标。href 用相对路径 "static/favicon.svg" 而不是绝对的 "/favicon.ico"：
+  这个页面有两个入口 —— repo.xlingo.fun/ 和 utils.xlingo.fun/mem/（nginx 剥前缀）。
+  写绝对路径的话第二个入口会去请求 utils.xlingo.fun/favicon.ico，那儿是另一个站，
+  图标要么 404 要么显示成别人的。相对路径两个入口都对。
+
+  同时给一个 data URI 兜底：SVG favicon 在旧 Safari 上不支持，
+  而 emoji 版本任何浏览器都能画（不依赖文件请求，也不受 base path 影响）。
+  顺序有讲究 —— 浏览器取最后一个它认识的，所以 svg 放后面优先生效。
+-->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231f4d3d'/%3E%3Ctext x='16' y='23' font-size='19' text-anchor='middle' fill='%23fff'%3EM%3C/text%3E%3C/svg%3E">
+<link rel="icon" type="image/svg+xml" href="static/favicon.svg">
+<link rel="apple-touch-icon" href="static/favicon.svg">
 <script>
 /* 主题必须在样式生效前就定下来，放到 body 里会先渲染一帧默认主题再跳变（闪白）。
    没存过偏好时跟随系统。 */
@@ -282,6 +295,20 @@ main > section{max-width:880px;margin-inline:auto}
 .tcar .ic{width:13px;height:13px;flex-basis:13px;stroke-width:2}
 .tcar.open{transform:rotate(90deg)}
 .tcount{color:var(--faint);font-size:12px;font-variant-numeric:tabular-nums}
+/* 项目删除按钮：默认不可见，悬停或键盘聚焦到该行时才显形。
+   常显的话每个项目行右侧都挂一个危险动作，而这一屏 95% 的用途是浏览 ——
+   把破坏性操作摆在浏览路径上只会让人误点。
+   但也不能只靠 :hover：键盘用户永远看不到它，所以 :focus-within 一并显形。
+   visibility 而不是 display:none —— 后者会让按钮不占位，行内元素在悬停瞬间
+   发生重排（"篇数"往右跳），看着像界面在抖。 */
+.pdel{margin-left:auto;flex:0 0 auto;visibility:hidden;
+      background:transparent;border:1px solid transparent;color:var(--danger);
+      padding:2px 5px;border-radius:6px;cursor:pointer;line-height:1}
+.trow:hover .pdel,.trow:focus-within .pdel,.pdel:focus-visible{visibility:visible}
+.pdel:hover{border-color:var(--danger);background:var(--hover)}
+/* 覆盖 .tree > .tnode > .trow .ic 那条 —— 它把项目行里所有图标染成强调绿，
+   删除按钮的图标必须是危险色，否则它看着像个普通的"文件夹操作"。 */
+.tree > .tnode > .trow .pdel .ic,.pdel .ic{color:var(--danger)}
 /* 每级缩进必须有明确台阶。实测第一版三级的文字左边缘是 324 / 330 / 347px
    （相邻只差 6px 和 17px），层级读起来像"没对齐"而不是"有嵌套"。
    现在每下一级整体缩进 22px，文字左边缘约 324 / 346 / 368。 */
@@ -657,6 +684,11 @@ tbody tr:last-child td{border-bottom:0}
       <div class="toolbar">
         <button class="ghost icon" onclick="loadTrash()" title="刷新" aria-label="刷新"><svg class="ic"><use href="#i-refresh"/></svg></button>
         <span class="muted" style="font-size:12.5px">删除是软删除，md 文件移到 .trash 且 git 有记录，可恢复。</span>
+        <!-- 清空按钮靠 margin-left:auto 推到最右：它跟左边那句"可恢复"说的是相反的事，
+             挨在一起会让人以为清空也能恢复。默认 disabled，loadTrash() 按实际条数放开
+             —— 回收站空着还能点"清空"，点了只会弹一句"清了 0 篇"。 -->
+        <button id="tpurge" class="danger" style="margin-left:auto" disabled
+                onclick="purgeTrash()"><svg class="ic sm"><use href="#i-trash"/></svg><span id="tpurgetxt">清空回收站</span></button>
       </div>
       <div id="tres"></div>
     </section>
@@ -1303,6 +1335,10 @@ function renderTree(items){
         <div class="tkids${open[tk]?'':' hidden'}" data-kid="${tid}">${rows}</div>
       </div>`;
     }).join('');
+    // 项目行的删除按钮只在悬停/聚焦时显形（CSS 控制）。
+    // 常显会让每个项目行右侧都挂一个红色危险动作，而这一屏的主要用途是浏览；
+    // 但也不能只靠 hover —— 键盘用户看不到，所以 :focus-within 一并显形。
+    // data-proj 存原始项目名，未归项目用 __none__ 哨兵（空串没法进 URL 路径段）。
     return `<div class="tnode">
       <div class="trow" data-n="${pid}" data-key="${encodeURIComponent(pk)}"
            role="button" tabindex="0" aria-expanded="${open[pk]?'true':'false'}">
@@ -1310,6 +1346,9 @@ function renderTree(items){
         <svg class="ic"><use href="#i-folder"/></svg>
         <span class="tname">${H(p)}</span>
         <span class="tcount">${n} 篇</span>
+        <button class="pdel" data-proj="${encodeURIComponent(p==='（未归项目）'?'__none__':p)}"
+                data-count="${n}" title="删除整个项目「${H(p)}」（${n} 篇移到回收站）"
+                aria-label="删除项目 ${H(p)}"><svg class="ic sm"><use href="#i-trash"/></svg></button>
       </div>
       <div class="tkids${open[pk]?'':' hidden'}" data-kid="${pid}">${kids}</div>
     </div>`;
@@ -1332,6 +1371,9 @@ function syncExpBtn(){
 // 键盘可达：树行是 div，需要手工把 Enter/Space 映射成点击
 $('#lres').addEventListener('keydown', e=>{
   if(e.key !== 'Enter' && e.key !== ' ') return;
+  // 焦点在删除按钮上时不要把 Enter 转发给整行 —— <button> 自己就会触发 click，
+  // 转发会让行折叠掉（而且是在确认框弹出之前）。
+  if(e.target.closest('.pdel')) return;
   const t = e.target.closest('.trow,.tdoc');
   if(!t) return;
   e.preventDefault();
@@ -1339,6 +1381,15 @@ $('#lres').addEventListener('keydown', e=>{
 });
 
 $('#lres').addEventListener('click', e=>{
+  // 删除按钮必须在这里最先拦截，而且要 stopPropagation。
+  // 它在 .trow 内部，不拦的话点一次会同时触发\"删项目\"和\"折叠该行\"——
+  // 确认框弹出时背后的行已经收起来了，用户看不到自己要删的是哪些内容。
+  const pd = e.target.closest('.pdel');
+  if(pd){
+    e.preventDefault(); e.stopPropagation();
+    delProject(decodeURIComponent(pd.dataset.proj), +pd.dataset.count);
+    return;
+  }
   const doc = e.target.closest('[data-id]');
   if(doc){ openDoc(+doc.dataset.id); return; }
   const row = e.target.closest('.trow');
@@ -1471,6 +1522,22 @@ async function delDoc(){
   try{ await api('/api/v1/documents/'+S.doc.id,{method:'DELETE'}); toast('已移到回收站'); nav('list'); loadLibs(); }
   catch(e){ toast(e.message,1); }
 }
+
+/* 删除整个项目。
+   确认文案必须把三件事说全：删的是哪个项目、有多少篇、去哪了。
+   只写\"确定删除？\"的话用户没有判断依据 —— 这是这一屏能一次毁掉最多内容的操作，
+   而项目行上并不显示篇数以外的信息。
+   注意这里是软删除（进回收站），所以文案要明确\"可恢复\"，
+   否则用户会以为不可逆而不敢用，或者以为已经彻底删掉了而不去清回收站。 */
+async function delProject(proj, count){
+  const label = proj === '__none__' ? '未归项目' : proj;
+  if(!confirm(`删除项目「${label}」下的全部 ${count} 篇记忆？\n\n会移到回收站（md 进 .trash，git 留记录），可以在回收站逐篇恢复。`)) return;
+  try{
+    const r = await api('/api/v1/projects/'+encodeURIComponent(proj),{method:'DELETE'});
+    toast(`已删除「${label}」${r.deleted} 篇`);
+    loadList(); loadLibs();
+  }catch(e){ toast(e.message,1); }
+}
 async function showHistory(){
   try{
     const h = await api('/api/v1/documents/'+S.doc.id+'/history');
@@ -1539,11 +1606,36 @@ async function loadTrash(){
            <h4>回收站是空的</h4>
            <p>删掉的记忆会先放到这里，md 文件移进 .trash 且 git 留有记录，随时能恢复。</p>
          </div>`;
+    // 按钮文案带上条数：不可逆操作要让人在点之前就知道规模。
+    // 文字写进独立的 span，不用 lastChild —— 按钮里还有个 <svg>，
+    // 靠节点位置取文本的话以后调整按钮内容就会静默改错地方。
+    const b = $('#tpurge'), bt = $('#tpurgetxt');
+    if(b) b.disabled = !d.items.length;
+    if(bt) bt.textContent = d.items.length? `清空回收站（${d.items.length} 篇）` : '清空回收站';
   }catch(e){ toast(e.message,1); }
 }
 async function restore(id){
   try{ await api('/api/v1/documents/'+id+'/restore',{method:'POST'}); toast('已恢复'); loadTrash(); loadLibs(); }
   catch(e){ toast(e.message,1); }
+}
+
+/* 清空回收站 = 真删。
+   用两步确认，而且第二步要求手打「清空」，不是简单的双 confirm ——
+   这是整个界面里唯一不可在界面上撤销的操作，连着点两次"确定"太容易了。
+   文案必须诚实说明兜底范围：DB 行和 .trash 里的 md 都真删，
+   但 git 历史还在（那是最后一层兜底），所以说"界面上无法恢复"而不是"永久消失"。 */
+async function purgeTrash(){
+  const n = ($('#tres').querySelectorAll('.card') || []).length;
+  if(!n){ toast('回收站是空的',1); return; }
+  if(!confirm(`彻底删除回收站里的 ${n} 篇记忆？\n\n数据库记录和 .trash 里的 md 文件都会真删，界面上无法再恢复。\n（git 历史仍保留，必要时可以从提交记录里找回内容）`)) return;
+  const t = prompt(`确认无误请输入「清空」两个字：`);
+  if(t === null) return;
+  if(t.trim() !== '清空'){ toast('输入不匹配，已取消',1); return; }
+  try{
+    const r = await api('/api/v1/trash/empty',{method:'POST'});
+    toast(`已清空：${r.purged} 篇记录 / ${r.files} 个文件`);
+    loadTrash(); loadLibs();
+  }catch(e){ toast(e.message,1); }
 }
 
 /* API Key */

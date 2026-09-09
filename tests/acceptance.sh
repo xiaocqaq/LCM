@@ -83,6 +83,11 @@ else
 fi
 # stdio 自己起子进程、自己用临时目录，不依赖任何在跑的实例 → 无条件跑
 run mcp_stdio           .venv/bin/python tests/mcp_stdio_test.py
+# 按项目软删 + 清空回收站 + favicon：需要本地实例（跟 local_mode 同一条件）
+if curl -s -o /dev/null --max-time 3 "$SQLITE_BASE/api/health"; then
+  run project_trash     env BASE="$SQLITE_BASE" DATA_DIR="${MEM_LOCAL_HOME:-/root/.memorys-demo}" \
+                          .venv/bin/python tests/project_trash_test.py
+fi
 
 echo
 echo "===== 向量覆盖率 ====="
