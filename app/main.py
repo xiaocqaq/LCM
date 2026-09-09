@@ -342,6 +342,39 @@ async def restore_document(doc_id: int, ctx: AuthContext = Depends(auth), sessio
     return {"ok": True, "restored": True}
 
 
+@app.delete("/api/v1/projects/{project:path}")
+async def delete_project(project: str, library: str | None = None,
+                         ctx: AuthContext = Depends(auth),
+                         session: AsyncSession = Depends(get_session)):
+    """删掉一个项目下的所有文档（软删除，进回收站）。
+
+    路径用 {project:path} 而不是普通参数：项目名里可能有斜杠
+    （实测库里就有 fsdp-portal-service 这类，将来也可能出现 a/b 形式），
+    普通路径段遇到斜杠会 404 而且完全看不出为什么。
+
+    "未归项目"（project 为空串）用 __none__ 这个哨兵表示 —— 空串没法放进
+    URL 路径段，`DELETE /api/v1/projects/` 会被当成另一个路由。
+    """
+    proj = "" if project == "__none__" else project
+    res = await service.soft_delete_project(session, ctx.user, proj, library)
+    if not res["deleted"]:
+        raise HTTPException(404, f"项目「{proj or '未归项目'}」下没有可删除的文档")
+    return {"ok": True, **res}
+
+
+@app.post("/api/v1/trash/empty")
+async def empty_trash(ctx: AuthContext = Depends(auth),
+                      session: AsyncSession = Depends(get_session)):
+    """清空回收站：DB 行和 .trash/ 下的 md 都真删，不可在界面上恢复。
+
+    用 POST 而不是 DELETE /api/v1/trash：这不是"删除某个资源"，
+    是一个有副作用的批量动作，而且 DELETE 在有些代理/客户端上会被
+    当成幂等可重试的请求。
+    """
+    res = await service.empty_trash(session, ctx.user)
+    return {"ok": True, **res}
+
+
 @app.get("/api/v1/documents/{doc_id}/history")
 async def doc_history(doc_id: int, ctx: AuthContext = Depends(auth), session: AsyncSession = Depends(get_session)):
     d = await _get_doc(ctx, session, doc_id, include_deleted=True)

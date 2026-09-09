@@ -338,6 +338,90 @@ async def restore_document(session: AsyncSession, user: User, doc: Document) -> 
     return doc
 
 
+async def soft_delete_project(session: AsyncSession, user: User, project: str,
+                              library: str | None = None) -> dict:
+    """把一个项目下的所有文档移进回收站。
+
+    刻意做成**软删除**（和单篇删除一致），不是直接抹掉：
+    "删掉整个项目" 是这套 UI 里一次能毁掉最多东西的操作，几十篇记忆一次没了。
+    进回收站的话 md 还在 .trash/、git 有记录、界面上能一键恢复；
+    真要腾空间就去回收站点清空，那一步才不可逆。
+    把"批量"和"不可逆"分成两步，是因为它们同时发生时用户没有纠错机会。
+
+    project 传空字符串表示"未归项目"的那一堆（Document.project 默认就是 ""）。
+    """
+    conds = [Document.user_id == user.id, Document.deleted_at.is_(None),
+             Document.project == project]
+    if library:
+        conds.append(Document.library == library)
+    docs = (await session.execute(select(Document).where(*conds))).scalars().all()
+    if not docs:
+        return {"deleted": 0, "titles": []}
+
+    root = user_root(settings.data_dir, user.id)
+    trash = root / ".trash"
+    stamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    titles = []
+    for doc in docs:
+        doc.deleted_at = _now()
+        await session.execute(delete(Chunk).where(Chunk.document_id == doc.id))
+        await links_mod.clear_supersede_marks(session, doc)
+        titles.append(doc.title)
+    await session.flush()
+
+    for doc in docs:
+        p = root / doc.rel_path
+        if p.exists():
+            trash.mkdir(parents=True, exist_ok=True)
+            p.rename(trash / f"{stamp}_{p.name}")
+    await session.commit()
+    label = project or "未归项目"
+    gitsvc.try_commit_all(root, f"delete project: {label}（{len(docs)} 篇）")
+    return {"deleted": len(docs), "titles": titles}
+
+
+async def empty_trash(session: AsyncSession, user: User) -> dict:
+    """清空回收站：DB 行真删 + .trash/ 下的 md 真删。不可恢复（除了翻 git 历史）。
+
+    两件事都要做，只做一件都会留下不一致：
+      - 只删 DB → .trash 里的 md 越堆越多（实测线上已经攒了 346 个文件），
+        而且 reindex 不会碰它们，等于永久占着磁盘却谁也看不见
+      - 只删文件 → 回收站列表还在，点恢复会写回一个空文档
+
+    git 历史刻意不动：那是最后一层兜底。真删的是工作区和索引，
+    翻 git 仍然能找回内容 —— 所以这一步"不可逆"指的是 UI 里不可逆。
+    """
+    docs = (await session.execute(select(Document).where(
+        Document.user_id == user.id, Document.deleted_at.is_not(None)
+    ))).scalars().all()
+
+    root = user_root(settings.data_dir, user.id)
+    trash = root / ".trash"
+
+    removed_files = 0
+    for doc in docs:
+        await session.execute(delete(Chunk).where(Chunk.document_id == doc.id))
+        await session.execute(delete(Document).where(Document.id == doc.id))
+
+    # .trash 整目录清掉，不是按文档名逐个匹配。
+    #
+    # 按名字匹配对不上：软删除时文件被重命名成 "{时间戳}_{原名}"，而 DB 行的
+    # rel_path 仍是原路径，同一路径反复建删会在 .trash 里留下多个同后缀文件，
+    # 没法可靠地判断哪个属于哪一行。而"清空回收站"的语义本来就是全清，
+    # 逐个匹配只会留下一堆认领不到的孤儿文件。
+    if trash.exists():
+        for f in sorted(trash.iterdir()):
+            if f.is_file():
+                f.unlink()
+                removed_files += 1
+
+    await session.commit()
+    if docs or removed_files:
+        gitsvc.try_commit_all(
+            root, f"purge trash: {len(docs)} 篇 / {removed_files} 个文件")
+    return {"purged": len(docs), "files": removed_files}
+
+
 def _doc_meta(doc: Document) -> dict:
     return {
         "id": f"doc_{doc.id}",
