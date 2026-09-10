@@ -281,117 +281,6 @@ main > section{max-width:880px;margin-inline:auto}
 @keyframes sk{0%{background-position:100% 0}100%{background-position:0 0}}
 @media (prefers-reduced-motion:reduce){.skel{animation:none}}
 /* 文件夹树（项目 → 类型 → 文档） */
-.tree{background:var(--panel);border:1px solid var(--line-strong);border-radius:var(--radius);padding:4px 6px 10px}
-.tnode{border-radius:9px}
-/* 行高从 7px 内边距压到 5px：这是索引型密集数据，不是内容卡片。
-   原来一行占 39px，一屏只装得下 2 个项目，滚动很长而信息很少。 */
-.trow{display:flex;align-items:center;gap:7px;padding:5px 9px;border-radius:8px;cursor:pointer;user-select:none}
-.trow:hover{background:var(--hover)}
-.trow:focus-visible,.tdoc:focus-visible{outline:2px solid var(--accent-bar);outline-offset:-2px}
-/* 折叠指示：SVG chevron 旋转。原来用 ASCII ▶ —— 两个字形光学大小不同、
-   垂直居中不准，且没法做过渡动画。热区仍保持 18px（字形只有 10px 太难点）。 */
-.tcar{width:18px;flex:0 0 18px;display:flex;align-items:center;justify-content:center;
-      color:var(--faint);transition:transform .14s ease}
-.tcar .ic{width:13px;height:13px;flex-basis:13px;stroke-width:2}
-.tcar.open{transform:rotate(90deg)}
-.tcount{color:var(--faint);font-size:12px;font-variant-numeric:tabular-nums}
-/* 项目删除按钮：默认不可见，悬停或键盘聚焦到该行时才显形。
-   常显的话每个项目行右侧都挂一个危险动作，而这一屏 95% 的用途是浏览 ——
-   把破坏性操作摆在浏览路径上只会让人误点。
-   但也不能只靠 :hover：键盘用户永远看不到它，所以 :focus-within 一并显形。
-   visibility 而不是 display:none —— 后者会让按钮不占位，行内元素在悬停瞬间
-   发生重排（"篇数"往右跳），看着像界面在抖。 */
-.pdel{margin-left:auto;flex:0 0 auto;visibility:hidden;
-      background:transparent;border:1px solid transparent;color:var(--danger);
-      padding:2px 5px;border-radius:6px;cursor:pointer;line-height:1}
-.trow:hover .pdel,.trow:focus-within .pdel,.pdel:focus-visible{visibility:visible}
-.pdel:hover{border-color:var(--danger);background:var(--hover)}
-/* 覆盖 .tree > .tnode > .trow .ic 那条 —— 它把项目行里所有图标染成强调绿，
-   删除按钮的图标必须是危险色，否则它看着像个普通的"文件夹操作"。 */
-.tree > .tnode > .trow .pdel .ic,.pdel .ic{color:var(--danger)}
-/* 每级缩进必须有明确台阶。实测第一版三级的文字左边缘是 324 / 330 / 347px
-   （相邻只差 6px 和 17px），层级读起来像"没对齐"而不是"有嵌套"。
-   现在每下一级整体缩进 22px，文字左边缘约 324 / 346 / 368。 */
-.tkids{padding-left:22px;border-left:1px solid var(--line);margin-left:12px}
-.tkids.hidden{display:none}
-/* 项目之间留呼吸；滚动时项目名和类型名都钉住，长列表里不会丢失上下文。
-   钉住的行必须有不透明底色，否则滚过去的内容会透上来。
-   两级 sticky 的 top 值要错开：项目行贴顶，类型行停在项目行下方一行的位置。 */
-/* 项目之间的间距必须显著大于类型组之间的间距（22px），否则顶层边界不够硬，
-   整卡读起来是一片连续文本，没有可以停顿的"块"。26 : 22 太接近，拉到 34 : 22。 */
-.tree > .tnode + .tnode{margin-top:20px;border-top:1px solid var(--line);padding-top:14px}
-.tree > .tnode > .trow{position:sticky;top:-4px;background:var(--panel);z-index:2}
-.tnode .tnode > .trow{position:sticky;top:26px;background:var(--panel);z-index:1}
-/* 三级层级要有字号/字重台阶，不能只靠缩进 —— 否则读者得"数缩进"才知道在第几层。
-   台阶方向很关键：类型行本质是**分隔标签**不是内容，要往下压（小、灰、加字距）；
-   文档标题是唯一的阅读主体，要提上来（大、近黑）。
-   一开始把两级都做成 13px 只差字重，结果长标题的墨量比 3 个字的类型名还重，
-   视觉上标题反倒更"大"，台阶等于没有。 */
-.tree > .tnode > .trow .tname{color:var(--text-title);font-size:16px;font-weight:700;letter-spacing:-.2px}
-/* 类型行做成"微标签/分隔条"，不是列表项：压矮行高 + 压小字号 + 提一档灰。
-   之前它跟文档行几乎同一条起跑线、字号只差 1px，快扫时读成"两级 + 一个装饰"。
-   **不要给中文加 uppercase / letter-spacing**：CJK 没有大小写，uppercase 完全无效，
-   而字距只会把"项目总结"拆成四个孤立的字，看着更散更小。
-   拉丁字母标签才吃这一套 —— 这里的标签是中文，所以只调字号/字重/颜色。 */
-.tnode .tnode > .trow{padding:1px 0;gap:5px}
-.tnode .tnode > .trow .tname{color:var(--dim);font-size:12px;font-weight:600}
-.tnode .tnode > .trow .tcount{font-size:11px}
-.tname{color:var(--text-strong)}
-.trow .ic{color:var(--faint)}
-.tree > .tnode > .trow .ic{color:var(--accent-bar)}
-/* 类型行的图标也压小压淡：它是标签的一部分，不该跟内容图标一样重 */
-.tnode .tnode > .trow > .ic{width:12px;height:12px;flex-basis:12px;color:var(--line-strong)}
-/* 分组靠留白而不是分割线。类型组头「上方留白 : 下方留白」要拉到 2.5:1 以上，
-   否则在等距的行阵里人眼辨认不出"这里断开了"。
-   第一次做成 14px : 2px（≈1.4:1），肉眼几乎看不出分组。 */
-.tnode .tnode{margin-top:22px}
-.tnode .tnode:first-child{margin-top:2px}
-.tnode .tnode > .trow{padding-bottom:1px;margin-bottom:2px}
-.card{transition:border-color .12s}
-/* 文档行：四列网格。
-   星级左对齐成列才能横向比较，右对齐只能一颗颗数。
-   日期用 tabular-nums，否则不同数字宽度会让这一列抖。
-   标题列给 max-width 收窄，避免元数据被甩到屏幕最右边造成长距离横跳。
-   试过用 max-content 让元数据紧跟标题，结果每行位置都不同，反而更难读 —— 别再改回去。 */
-/* 文档行：三列网格 [标题][重要度][时间]。
-   元数据必须收成一个紧凑簇并整体右对齐 —— 之前把重要度放在标题和时间中间、
-   左右各留几十像素空隙，那个点就"漂"在空白带里，既不跟标题关联也不跟时间关联。
-   标题列 minmax(0,1fr) + ellipsis，元数据列位置固定，眼睛才有一条稳定的扫视轴。
-   去掉了行首的文件图标：这一行必然是文档、类型又已由组头给出，那个图标零信息量还占 26px。 */
-/* padding-left 30 而不是 8：文档行没有"折叠箭头 + 类型图标"这个 30px 前缀列，
-   如果只靠 .tkids 的 22px 缩进，标题会落在类型名的正下方（实测 L2=342 / L3=345，
-   只差 3px），三级台阶又塌了。补上这一段，实测变成 324 / 342 / 367。
-
-   max-width 而不是撑满卡片：标题普遍在中段就结束，时间贴最右缘时中间有 ~800px
-   纯空白，横向跳视成本极高（"这个时间是哪一行的？"）。
-   试过加斑马纹引导，但明度差小到几乎连成一片，没用 —— 真正的解法是**把行封顶**，
-   让元数据紧跟在可读行宽的末尾，而不是被甩到屏幕边缘。 */
-.tdoc{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:12px;
-      align-items:center;max-width:760px;
-      padding:5px 10px 5px 30px;border-radius:8px;cursor:pointer}
-.tdoc:hover{background:var(--hover)}
-.tdoc:hover .tt{color:var(--accent-text)}
-/* 文档标题是这一屏唯一的阅读主体，14px 近黑 */
-.tdoc .tt{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px;color:var(--text-body)}
-.tdoc .td{color:var(--faint);font-size:12px;text-align:right;font-variant-numeric:tabular-nums;
-          min-width:52px;white-space:nowrap}
-/* 日期部分压灰、时分留在前台：同一批写入的文档日期都一样（一屏 15 行全是"昨天"），
-   重复的那半截应该退到背景，有区分度的时分才该被读到。 */
-.tdoc .td .dd{color:var(--date-dim)}
-/* 热度：客观累积的读取次数，比手填的 importance 有区分度。
-   实测 access_count 分布 0→24（方差大），importance 有 52% 都是 5 分（几乎没方差）。
-   只给"被读过 ≥5 次"的文档显示，格式 "×9" —— 稀疏才是信号。 */
-/* 热度徽标：客观读取次数。**必须比主按钮弱**。
-   第一版用了 accent 绿 + 绿底，结果它成了整个列表里对比度最高的元素 ——
-   一个次要指标抢走了「+ 新建」的视觉优先级，而且只有少数行有，斑点感很强。
-   现在改成中性灰底 + 常规灰字，只靠"有/无"传达信号，不靠颜色喊。 */
-/* 徽标里那个 9px 图标已经小到辨认不出画的是什么，纯装饰还拉低了整块的对比度。
-   改成"文字 + 单位"：'读 9 次' 自带图例，不需要用户猜。
-   字色提到 --dim（≥4.5:1），不再是"看不清也看不懂"的灰点。 */
-.hot{display:inline-flex;align-items:center;flex:0 0 auto;
-     font-size:11px;color:var(--dim);font-variant-numeric:tabular-nums;white-space:nowrap;
-     background:var(--panel2);border:1px solid var(--line);padding:0 6px;border-radius:5px}
-.tdoc:hover .hot{color:var(--accent-text);border-color:var(--accent-bar)}
 /* ===== 文件夹网格视图 =====
    列数不用媒体查询写死：auto-fill + minmax(170px,1fr) 让浏览器自己算，
    主区内容宽 880px 时正好 4~5 列，窄窗口自动降到 3/2 列，不需要断点表。
@@ -402,8 +291,17 @@ main > section{max-width:880px;margin-inline:auto}
        padding:12px 13px;cursor:pointer;transition:border-color .12s,background .12s;
        min-width:0 /* 网格子项默认 min-width:auto，长项目名会把列撑爆 */}
 .pcard:hover{border-color:var(--accent-bar);background:var(--hover)}
+/* 删除按钮（项目级）：默认隐藏，悬停/聚焦卡片时显形。
+   从原树形视图迁移过来，策略不变：常驻的危险按钮会抢占浏览型界面的注意力。
+   visibility 而非 display:none —— 保持占位，卡片右上角不跳动。 */
+.pdel{flex:0 0 auto;visibility:hidden;background:transparent;
+      border:1px solid transparent;color:var(--danger);
+      padding:3px 5px;border-radius:6px;cursor:pointer;line-height:1}
+.pcard:hover .pdel,.pcard:focus-within .pdel,.pdel:focus-visible{visibility:visible}
+.pdel:hover{border-color:var(--danger);background:var(--hover)}
+.pdel .ic{color:var(--danger)}
 .pcard:focus-visible{outline:2px solid var(--accent-bar);outline-offset:2px}
-.pc-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:7px}
+.pc-top{display:flex;align-items:center;justify-content:space-between;gap:4px;margin-bottom:7px}
 .pc-top .ic{color:var(--accent-bar)}
 /* 项目名单行截断。word-break 不用 —— 项目名是连续标识符，按字符断行反而难读，
    ellipsis 一刀切，全名在卡片 title 里。 */
@@ -615,25 +513,17 @@ tbody tr:last-child td{border-bottom:0}
           <option value="glossary">术语</option>
           <option value="fact">事实</option>
         </select>
-        <!-- 分段控件而不是"切到 X"按钮：能同时看到有哪些视图和现在在哪个 -->
-        <span class="seg" id="lmode" role="group" aria-label="视图模式">
-          <button data-m="tree" onclick="setListMode('tree')" title="按项目分组展开"><svg class="ic sm"><use href="#i-folder"/></svg>分组</button>
-          <button data-m="flat" onclick="setListMode('flat')" title="文件夹网格，一行 4~5 个项目"><svg class="ic sm"><use href="#i-grid"/></svg>文件夹</button>
-        </span>
+        <!-- 切换按钮删掉了：只剩一种视图 —— 文件夹网格 → 点进去平铺。
+             曾经有"分组（树形）/平铺/文件夹"三种，用户拍板只要文件夹一种，
+             保留切换等于把已经做过的决定再摆出来让用户重新选一遍。 -->
         <button class="ghost icon" onclick="loadList()" title="刷新" aria-label="刷新"><svg class="ic"><use href="#i-refresh"/></svg></button>
         <button class="primary" onclick="newDoc()"><svg class="ic sm"><use href="#i-plus"/></svg>新建</button>
       </div>
       <!-- 操作和统计推到两端：之前它们同色同字号紧挨着，
-           一个是可点的操作、一个是只读的数字，视觉上分不开。
-           max-width 跟 .tdoc 的 760 对齐 —— 否则统计数字的右边缘（880）比
-           下方文档行的时间列多出 120px（实测需 837 才对齐：卡片内边距+缩进），时间列变成一条不跟任何东西对齐的浮动边。 -->
-      <div class="row" style="margin:-6px 0 10px;gap:8px;flex-wrap:wrap;justify-content:space-between;max-width:837px">
+           一个是可点的操作、一个是只读的数字，视觉上分不开。 -->
+      <div class="row" style="margin:-6px 0 10px;gap:8px;flex-wrap:wrap;justify-content:space-between">
         <span class="row" style="gap:8px">
           <span id="pfilter" class="hidden"></span>
-          <!-- 展开/收起合成一个 toggle，不再各占一个胶囊按钮 -->
-          <span id="treeops" class="row" style="gap:4px">
-            <button class="link" id="expbtn" onclick="treeToggleAll()">全部收起</button>
-          </span>
         </span>
         <span class="muted" id="tstat" style="font-size:12px"></span>
       </div>
@@ -895,7 +785,7 @@ tbody tr:last-child td{border-bottom:0}
 
 <script>
 const S = {token:localStorage.getItem('mem_token')||'', user:null, doc:null, boot:'', branch:'',
-           listMode:localStorage.getItem('mem_listmode')||'tree', treeOpen:{}, docs:[], lastLib:undefined};
+           docs:[], lastLib:undefined};
 const $ = s=>document.querySelector(s);
 const H = s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
@@ -1182,21 +1072,9 @@ const TYPE_ICON = {project_summary:'i-summary', decision:'i-scale', preference:'
 // 类型的展示顺序：按"回看时的重要程度"排，不用字母序
 const TYPE_ORDER = ['project_summary','decision','preference','howto','glossary','fact'];
 
-function setListMode(m){
-  if(S.listMode === m) return;
-  S.listMode = m;
-  localStorage.setItem('mem_listmode', m);
-  loadList(S.lastLib);
-}
-
-/* 展开/收起合成一个 toggle：原来两个胶囊按钮常驻一整行，
-   而这两个动作互斥，同时给两个入口没有意义。 */
-function treeToggleAll(){
-  const open = S.treeOpen || (S.treeOpen = {});
-  const anyOpen = Object.values(open).some(v=>v);
-  for(const k of Object.keys(open)) open[k] = !anyOpen;
-  renderTree(S.docs || []);
-}
+/* 视图模式只剩一种：无项目过滤 → 文件夹网格；有过滤 → 该项目的平铺列表。
+   曾经的 setListMode/treeToggleAll/renderTree/syncExpBtn 整套树形逻辑
+   在"只要文件夹视图"的拍板后删掉了。 */
 
 let loadSeq = 0;
 async function loadList(lib, proj){
@@ -1219,17 +1097,16 @@ async function loadList(lib, proj){
   if(t) url+='&type='+t;
   if(lib) url+='&library='+encodeURIComponent(lib);
   if(S.projFilter) url+='&project='+encodeURIComponent(S.projFilter);
-  const tree = S.listMode !== 'flat';
-  // 分段控件：高亮当前视图，而不是显示"点了会切到什么"
-  $('#lmode').querySelectorAll('button').forEach(b=>
-    b.classList.toggle('on', b.dataset.m === (tree?'tree':'flat')));
-  $('#treeops').classList.toggle('hidden', !tree);
-  // 有项目过滤时给个可点掉的标记，否则用户会困在某个项目里找不到出口
+  // 有项目过滤时给个可点掉的返回标记 —— 现在的导航模型是
+  // "文件夹总览 ⇄ 进入项目"，这个标记就是"返回全部"的出口。
+  // 文案用"‹ 全部项目"而不是项目名加叉：在文件夹语境里,
+  // 用户的心智是"退回上一级"，不是"关掉某个筛选条件"。
   const pf = $('#pfilter');
   if(S.projFilter){
     pf.classList.remove('hidden');
-    pf.innerHTML = `<button class="link" onclick="clearProj()">${H(S.projFilter)}`
-      + `<svg class="ic sm"><use href="#i-x"/></svg></button>`;
+    pf.innerHTML = `<button class="link" onclick="clearProj()" title="返回全部项目">`
+      + `<svg class="ic sm"><use href="#i-chev" style="transform:rotate(-90deg)"/></svg>`
+      + `全部项目 <span style="opacity:.55">/ ${H(S.projFilter)}</span></button>`;
   }else{ pf.classList.add('hidden'); pf.innerHTML=''; }
   try{
     const d = await api(url);
@@ -1239,13 +1116,13 @@ async function loadList(lib, proj){
       $('#lres').innerHTML = `<div class="empty">
         <svg class="ic"><use href="#i-docs"/></svg>
         <h4>${q||t||S.projFilter?'这个筛选下没有文档':'库里还没有记忆'}</h4>
-        <p>${q||t||S.projFilter?'放宽筛选条件，或清掉项目过滤再看。'
+        <p>${q||t||S.projFilter?'放宽筛选条件，或返回全部项目再看。'
              :'点右上角「新建」写第一条，或者让挂了 MCP 的 agent 自己往里写。'}</p>
       </div>`;
       $('#tstat').textContent = '';
       return;
     }
-    tree ? renderTree(d.items) : renderGrid(d.items);
+    S.projFilter ? renderFlat(d.items) : renderGrid(d.items);
   }catch(e){ if(seq === loadSeq) toast(e.message,1); }
 }
 
@@ -1275,11 +1152,17 @@ function renderGrid(items){
     const last = latest[p];
     // 卡片上放"最近更新的一篇"，让用户不用点进去就知道这个项目最近在动什么
     const sub = last ? H(last[1].length>30? last[1].slice(0,30)+'…' : last[1]) : '';
+    // 删除按钮：树形视图删掉后项目删除的唯一入口挪到了卡片上。
+    // 悬停/聚焦显形（跟原来树行一致的策略）；要 stopPropagation，
+    // 否则点它会同时触发"进项目"。
+    const pid = p==='（未归项目）' ? '__none__' : p;
     return `<div class="pcard" data-proj="${encodeURIComponent(p)}"
                  title="${H(p)}｜${docs.length} 篇｜最近：${last?H(last[1]):''}">
       <div class="pc-top">
         <svg class="ic"><use href="#i-folder"/></svg>
-        ${imp5(p)?'<span class="imp"><svg class="ic"><use href="#i-star"/></svg></span>':''}
+        <button class="pdel" data-proj="${encodeURIComponent(pid)}"
+                data-count="${docs.length}" title="删除整个项目「${H(p)}」（${docs.length} 篇移到回收站）"
+                aria-label="删除项目 ${H(p)}"><svg class="ic sm"><use href="#i-trash"/></svg></button>
       </div>
       <div class="pc-name">${H(p==='（未归项目）'?'未归项目':p)}</div>
       <div class="pc-meta">${docs.length} 篇${last?` · ${H(fmtWhen(last[0]))}`:''}</div>
@@ -1326,140 +1209,14 @@ function fmtWhen(iso){
   return y === now.getFullYear() ? md : String(y).slice(2)+'-'+md;
 }
 
-/* 分组视图里，把标题开头重复的项目名整段去掉。
-   实测 fsdp-service 7 篇里 4 篇以项目名开头，组头已经写着 fsdp-service，
-   标题里再重复一遍等于每行先浪费十几个字符。
-   第一版只是把前缀"压灰"，但它照样占位 —— 结果同组里 4 行的真实内容从 x=430 起、
-   3 行从 x=346 起，左边缘参差不齐，反而更难扫。所以改成直接不渲染。
-   完整标题保留在行的 title 属性里（悬停可见），平铺视图和搜索结果不做这个处理
-   —— 那两处没有项目上下文，前缀是必要的定位信息。 */
-function stripPrefix(title, proj){
-  if(proj && title.startsWith(proj)){
-    const rest = title.slice(proj.length);
-    // 后面必须紧跟分隔符才算前缀，否则 "memorys上线记录" 这种会被误切成"上线记录"
-    const m = rest.match(/^[\s·:：\-—|/]+(.+)$/);
-    if(m) return H(m[1]);
-  }
-  return H(title);
-}
-
-/* 热度徽标的阈值必须自适应，不能写死。
-   access_count 随每次检索单调增长：今天"≥5 次"能筛掉一半，一个月后全库都超过 5，
-   徽标又变成每行都有的噪点（第一版就是写死 5，实测当场命中 11/23 = 48%）。
-   改成取当前列表的 85 分位，并要求至少 3 次 —— 冷启动阶段（大家都是 0-1 次）
-   直接返回 Infinity 一个都不显示，比显示"最热的那篇被读过 1 次"诚实。 */
-function hotThreshold(items){
-  const v = items.map(i=>i.accessCount||0).filter(n=>n>=3).sort((a,b)=>a-b);
-  if(v.length < 3) return Infinity;
-  return Math.max(3, v[Math.floor(v.length*0.85)]);
-}
-
-function renderTree(items){
-  // 分组：项目 → 类型 → 文档。没填 project 的归到"未分类项目"
-  const byProj = {};
-  for(const i of items){
-    const p = i.project || '（未归项目）';
-    (byProj[p] = byProj[p] || {})[i.type] = (byProj[p][i.type] || []).concat(i);
-  }
-  // 项目排序：文档多的在前，同数量按名字；未归类固定垫底
-  const projs = Object.keys(byProj).sort((a,b)=>{
-    if(a==='（未归项目）') return 1;
-    if(b==='（未归项目）') return -1;
-    const ca = Object.values(byProj[a]).flat().length;
-    const cb = Object.values(byProj[b]).flat().length;
-    return cb - ca || a.localeCompare(b);
-  });
-
-  // 折叠状态用「项目名/类型」当 key 存在 S.treeOpen 里（重渲染后仍保持），
-  // 但 DOM 上不放这个 key —— 项目名可能含引号/特殊字符，拼进属性选择器会炸。
-  // DOM 里改用递增编号，配对靠 data-kid 数字。
-  const open = S.treeOpen || (S.treeOpen = {});
-  const HOT = hotThreshold(items);
-  let seq = 0;
-  const html = projs.map(p=>{
-    const types = Object.keys(byProj[p]).sort(
-      (a,b)=>TYPE_ORDER.indexOf(a)-TYPE_ORDER.indexOf(b));
-    const n = Object.values(byProj[p]).flat().length;
-    const pk = 'p\u0000'+p;
-    if(open[pk] === undefined) open[pk] = true;   // 默认展开
-    const pid = ++seq;
-    const kids = types.map(t=>{
-      const docs = byProj[p][t].slice().sort(
-        (a,b)=>(b.updatedAt||'').localeCompare(a.updatedAt||''));
-      const tk = pk+'\u0000t\u0000'+t;
-      if(open[tk] === undefined) open[tk] = true;
-      const tid = ++seq;
-      // 稀疏信号选的是 access_count 不是 importance：
-      // 实测 importance 52%(12/23) 都是 5 分，方差接近零；access_count 分布 0→24。
-      // 手填的自我评价没区分度，客观累积的读取次数才有 —— graph-memory 用 validatedCount
-      // 做的是同一件事。阈值走 hotThreshold() 自适应，不写死。
-      // 时间列：日期部分压灰、时分保持正常色。
-      // 试过"同一天只在第一行写日期，后续行只留 21:00" —— 放弃了：裸时间有歧义
-      // （多数人会读成今天），而日期锚点只在子组第一行，子组一折叠锚点就没了。
-      // 现在每行都带完整日期，靠色阶让重复的"昨天"退到背景，有差别的时分留在前台。
-      const rows = docs.map(i=>{
-        const w = fmtWhen(i.updatedAt);
-        const sp = w.lastIndexOf(' ');
-        const show = sp > 0
-          ? `<span class="dd">${H(w.slice(0,sp))}</span> ${H(w.slice(sp+1))}`
-          : H(w);
-        return `<div class="tdoc" data-id="${i.id}" title="${H(i.title)}｜重要度 ${i.importance}/5｜被读取 ${i.accessCount||0} 次｜更新 ${H((i.updatedAt||'').slice(0,16).replace('T',' '))}" role="button" tabindex="0">
-          <span class="tt">${stripPrefix(i.title, p)}</span>
-          ${(i.accessCount||0)>=HOT?`<span class="hot" title="被检索命中 ${i.accessCount} 次 —— 常用">读 ${i.accessCount} 次</span>`:'<span></span>'}
-          <span class="td">${show}</span>
-        </div>`;
-      }).join('');
-      return `<div class="tnode">
-        <div class="trow" data-n="${tid}" data-key="${encodeURIComponent(tk)}"
-             role="button" tabindex="0" aria-expanded="${open[tk]?'true':'false'}">
-          <span class="tcar${open[tk]?' open':''}"><svg class="ic"><use href="#i-chev"/></svg></span>
-          <svg class="ic sm"><use href="#${TYPE_ICON[t]||'i-file'}"/></svg>
-          <span class="tname">${H(TYPE_LABEL[t]||t)}</span>
-          <span class="tcount">${docs.length} 篇</span>
-        </div>
-        <div class="tkids${open[tk]?'':' hidden'}" data-kid="${tid}">${rows}</div>
-      </div>`;
-    }).join('');
-    // 项目行的删除按钮只在悬停/聚焦时显形（CSS 控制）。
-    // 常显会让每个项目行右侧都挂一个红色危险动作，而这一屏的主要用途是浏览；
-    // 但也不能只靠 hover —— 键盘用户看不到，所以 :focus-within 一并显形。
-    // data-proj 存原始项目名，未归项目用 __none__ 哨兵（空串没法进 URL 路径段）。
-    return `<div class="tnode">
-      <div class="trow" data-n="${pid}" data-key="${encodeURIComponent(pk)}"
-           role="button" tabindex="0" aria-expanded="${open[pk]?'true':'false'}">
-        <span class="tcar${open[pk]?' open':''}"><svg class="ic"><use href="#i-chev"/></svg></span>
-        <svg class="ic"><use href="#i-folder"/></svg>
-        <span class="tname">${H(p)}</span>
-        <span class="tcount">${n} 篇</span>
-        <button class="pdel" data-proj="${encodeURIComponent(p==='（未归项目）'?'__none__':p)}"
-                data-count="${n}" title="删除整个项目「${H(p)}」（${n} 篇移到回收站）"
-                aria-label="删除项目 ${H(p)}"><svg class="ic sm"><use href="#i-trash"/></svg></button>
-      </div>
-      <div class="tkids${open[pk]?'':' hidden'}" data-kid="${pid}">${kids}</div>
-    </div>`;
-  }).join('');
-
-  $('#lres').innerHTML = '<div class="tree">'+html+'</div>';
-  $('#tstat').textContent = `${projs.length} 个项目 · ${items.length} 篇`;
-  syncExpBtn();
-}
-
-/* toggle 按钮的文案要反映"点了会发生什么"，得在渲染后同步一次 */
-function syncExpBtn(){
-  const b = $('#expbtn'); if(!b) return;
-  const open = S.treeOpen || {};
-  const anyOpen = Object.values(open).some(v=>v);
-  b.textContent = anyOpen ? '全部收起' : '全部展开';
-}
 
 // 事件委托：树是动态重建的，绑在容器上才不会因重渲染丢监听
 // 键盘可达：树行是 div，需要手工把 Enter/Space 映射成点击
 $('#lres').addEventListener('keydown', e=>{
   if(e.key !== 'Enter' && e.key !== ' ') return;
-  // 焦点在删除按钮上时不要把 Enter 转发给整行 —— <button> 自己就会触发 click，
-  // 转发会让行折叠掉（而且是在确认框弹出之前）。
-  if(e.target.closest('.pdel')) return;
-  const t = e.target.closest('.trow,.tdoc');
+  // <button> 自己就会触发 click，转发会重复触发（删除按钮点一次弹两次确认）
+  if(e.target.closest('.pdel,button')) return;
+  const t = e.target.closest('.pcard,[data-id]');
   if(!t) return;
   e.preventDefault();
   t.click();
@@ -1485,17 +1242,6 @@ $('#lres').addEventListener('click', e=>{
   }
   const doc = e.target.closest('[data-id]');
   if(doc){ openDoc(+doc.dataset.id); return; }
-  const row = e.target.closest('.trow');
-  if(!row) return;
-  const key = decodeURIComponent(row.dataset.key);
-  S.treeOpen = S.treeOpen || {};
-  const nowOpen = !S.treeOpen[key];
-  S.treeOpen[key] = nowOpen;
-  row.querySelector('.tcar').classList.toggle('open', nowOpen);
-  row.setAttribute('aria-expanded', nowOpen ? 'true' : 'false');
-  // 用编号配对，不用项目名（名字里的引号会撑破属性选择器）
-  const kid = row.parentElement.querySelector(`.tkids[data-kid="${row.dataset.n}"]`);
-  if(kid) kid.classList.toggle('hidden', !nowOpen);
 });
 
 /* 编辑 */
