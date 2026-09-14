@@ -82,7 +82,13 @@ html[data-theme="dark"]{
 }
 *{box-sizing:border-box}
 html,body{margin:0;height:100%}
-body{background:var(--bg);color:var(--text-body);font:14px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+/* 字体栈里必须带一个 Linux 上真实存在的 CJK 面：原来只列了 PingFang SC(mac) 和
+   Microsoft YaHei(win)，Linux 直接落到 generic sans-serif —— 那是个纯拉丁面，
+   于是全站中文渲染成豆腐块。Noto Sans CJK SC 是各发行版的标配中文字体。 */
+body{background:var(--bg);color:var(--text-body);
+     font:14px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei","Noto Sans CJK SC","Noto Sans SC","WenQuanYi Zen Hei","Droid Sans Fallback",sans-serif}
+/* 表单控件不继承 body 字体（UA 样式给的是 arial/13.33px），中文同样会掉成豆腐块 */
+input,select,textarea,button{font-family:inherit}
 
 /* ── 图标 ──
    currentColor 是关键：选中态文字变色时图标跟着变，emoji 做不到这件事。
@@ -467,8 +473,8 @@ tbody tr:last-child td{border-bottom:0}
 
   <aside>
     <div class="sec">记忆</div>
-    <div class="navitem on" data-v="search" onclick="nav('search')"><svg class="ic"><use href="#i-search"/></svg>检索</div>
-    <div class="navitem" data-v="list" onclick="nav('list')"><svg class="ic"><use href="#i-docs"/></svg>全部文档</div>
+    <div class="navitem on" data-v="list" onclick="nav('list')"><svg class="ic"><use href="#i-docs"/></svg>全部文档</div>
+    <div class="navitem" data-v="search" onclick="nav('search')"><svg class="ic"><use href="#i-search"/></svg>检索</div>
     <div class="navitem" data-v="edit" onclick="newDoc()"><svg class="ic"><use href="#i-write"/></svg>新建记忆</div>
     <div class="navitem" data-v="bootstrap" onclick="nav('bootstrap')"><svg class="ic"><use href="#i-rocket"/></svg>上下文引导包</div>
     <div class="sec">管理</div>
@@ -484,7 +490,7 @@ tbody tr:last-child td{border-bottom:0}
 
   <main>
     <!-- 检索 -->
-    <section id="v-search">
+    <section id="v-search" class="hidden">
       <div class="searchbar">
         <label class="ifield">
           <svg class="ic"><use href="#i-search"/></svg>
@@ -498,7 +504,7 @@ tbody tr:last-child td{border-bottom:0}
     </section>
 
     <!-- 列表 -->
-    <section id="v-list" class="hidden">
+    <section id="v-list">
       <div class="toolbar">
         <label class="ifield">
           <svg class="ic"><use href="#i-search"/></svg>
@@ -877,7 +883,8 @@ async function boot(){
     $('#login').classList.add('hidden'); $('#appview').classList.remove('hidden');
     renderMcp();
     const dl = $('#docslink'); if(dl){ dl.href = BASE + '/api/docs'; dl.textContent = BASE + '/api/docs'; }
-    await loadLibs(); nav('search');
+    // 首屏默认落「全部文档」：进站第一眼要看到库里有什么，而不是一个空搜索框
+    await loadLibs(); nav('list');
   }catch(e){ logout(); }
 }
 
