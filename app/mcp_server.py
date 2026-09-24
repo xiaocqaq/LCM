@@ -54,6 +54,30 @@ def _j(obj) -> str:
     return json.dumps(obj, ensure_ascii=False, indent=2)
 
 
+def public_persistence_status(doc) -> dict | None:
+    """Expose outcomes, never subprocess stderr, URLs or exception details."""
+    status = getattr(doc, "persistence_status", None)
+    if not isinstance(status, dict):
+        return None
+    public = {key: status[key] for key in ("disk", "database", "ok", "retryable") if key in status}
+    git = status.get("git")
+    if isinstance(git, dict):
+        public["git"] = {key: git[key] for key in ("ok", "status", "commit", "retryable") if key in git}
+        if git.get("error"):
+            public["git"]["error"] = "Git 提交未完成，请稍后重试"
+    return public
+
+
+def _git_message(doc) -> str:
+    status = public_persistence_status(doc) or {}
+    git = status.get("git") or {}
+    if git.get("ok") is True:
+        return "已 git 提交。" if git.get("commit") else "Git 已同步，无需新增提交。"
+    if git.get("ok") is False:
+        return "Git 提交未完成，请稍后重试。"
+    return "Git 状态未确认，请查看 persistence_status。"
+
+
 @mcp.tool()
 async def memory_search(query: str, limit: int = 8, library: str = "", project: str = "") -> str:
     """在当前用户的知识库中检索记忆。中文友好（jieba 分词 + BM25 + 模糊兜底 + 可选向量混合）。
@@ -80,6 +104,8 @@ async def memory_search(query: str, limit: int = 8, library: str = "", project: 
 @mcp.tool()
 async def memory_get(doc_id: int) -> str:
     """按 id 读取一篇记忆的完整内容（含元数据）。"""
+    from .revisions import document_revision
+
     user = _user()
     async with SessionLocal() as s:
         d = (await s.execute(
@@ -100,6 +126,7 @@ async def memory_get(doc_id: int) -> str:
             "incoming_links": await links_mod.incoming_links(s, user, d),
             "updated_at": d.updated_at.isoformat() if d.updated_at else None,
             "content_hash": d.content_hash,
+            "revision": document_revision(d),
         })
 
 
@@ -117,7 +144,7 @@ async def memory_write(
     branch: str = "",
     links: list[dict] | None = None,
 ) -> str:
-    """写入一条记忆（md 格式落盘 + git 提交 + 建索引）。
+    """写入一条记忆（md 落盘、索引与 git 状态见返回的 persistence_status）。
 
     type: project_summary | decision | preference | howto | glossary | fact
     importance: 1-5，影响 memory_bootstrap 的优先级。
@@ -138,6 +165,8 @@ async def memory_write(
         linkReport.unresolved，不会静默失败。
     """
     user = _user()
+    if mode not in {"create", "upsert"}:
+        return _j({"ok": False, "error": "invalid", "message": "mode 必须是 create 或 upsert"})
     payload = {
         "title": title, "content": content, "type": type, "project": project,
         "tags": tags or [], "importance": importance, "library": library, "source": source,
@@ -160,13 +189,15 @@ async def memory_write(
             doc = await service.update_document(s, user, e.doc, payload)
             return _j({"ok": True, "id": doc.id, "title": doc.title, "action": "upserted",
                        "path": f"{doc.library}/{doc.slug}.md",
-                       "message": f"已覆盖 doc={doc.id}「{doc.title}」。"})
+                       "persistence_status": public_persistence_status(doc),
+                       "message": f"已覆盖 doc={doc.id}「{doc.title}」；{_git_message(doc)}"})
         except ValueError as e:
             return _j({"ok": False, "error": "invalid", "message": f"写入失败：{e}"})
         return _j({"ok": True, "id": doc.id, "title": doc.title, "action": "created",
                    "path": f"{doc.library}/{doc.slug}.md",
                    "linkReport": getattr(doc, "link_report", None),
-                   "message": f"已写入 doc={doc.id}「{doc.title}」，已 git 提交。"})
+                   "persistence_status": public_persistence_status(doc),
+                   "message": f"已写入 doc={doc.id}「{doc.title}」；{_git_message(doc)}"})
 
 
 @mcp.tool()
@@ -175,11 +206,13 @@ async def memory_update(
     title: str = "",
     content: str = "",
     type: str = "",
-    project: str = "",
+    project: str | None = None,
     tags: list[str] | None = None,
     importance: int = 0,
     mode: str = "replace",
     links: list[dict] | None = None,
+    expected_hash: str | None = None,
+    expected_revision: str | None = None,
 ) -> str:
     """更新一条已有记忆。只传需要改的字段。
 
@@ -188,8 +221,15 @@ async def memory_update(
         整体替换而非合并是刻意的：关系需要能被删掉，
         增量合并的话写错的 supersedes 就再也撤不掉了。
         格式与 memory_write 相同。
+    expected_revision: memory_get 返回的 revision；正文或任意可编辑元数据变化时拒绝覆盖。
+    expected_hash: 兼容旧调用，仅校验 content_hash，不能检测元数据并发修改。
+    project: 不传保持原样，空字符串清除项目。
     """
+    from .revisions import document_revision
+
     user = _user()
+    if mode not in {"replace", "append"}:
+        return _j({"ok": False, "error": "invalid", "message": "mode 必须是 replace 或 append"})
     async with SessionLocal() as s:
         d = (await s.execute(
             select(Document).where(Document.id == doc_id, Document.user_id == user.id,
@@ -202,10 +242,10 @@ async def memory_update(
         if title:
             payload["title"] = title
         if content:
-            payload["content"] = (d.content.rstrip() + "\n\n" + content) if mode == "append" else content
+            payload["_append_content" if mode == "append" else "content"] = content
         if type:
             payload["type"] = type
-        if project:
+        if project is not None:
             payload["project"] = project
         if tags is not None:
             payload["tags"] = tags
@@ -215,10 +255,18 @@ async def memory_update(
             payload["links"] = links
         if not payload:
             return _j({"ok": False, "error": "empty", "message": "没有要更新的字段。"})
-        d = await service.update_document(s, user, d, payload)
+        try:
+            d = await service.update_document(s, user, d, payload, expected_hash=expected_hash, expected_revision=expected_revision)
+        except service.ConflictError:
+            return _j({"ok": False, "error": "conflict", "content_hash": d.content_hash,
+                       "revision": document_revision(d),
+                       "message": "文档已变化，请重新 memory_get 后再更新。"})
         return _j({"ok": True, "id": d.id, "title": d.title, "action": "updated",
                    "linkReport": getattr(d, "link_report", None),
-                   "message": f"已更新 doc={d.id}「{d.title}」，已 git 提交。"})
+                   "content_hash": d.content_hash,
+                   "revision": document_revision(d),
+                   "persistence_status": public_persistence_status(d),
+                   "message": f"已更新 doc={d.id}「{d.title}」；{_git_message(d)}"})
 
 
 @mcp.tool()
@@ -234,9 +282,10 @@ async def memory_delete(doc_id: int) -> str:
             return _j({"ok": False, "error": "not_found",
                        "message": f"文档 {doc_id} 不存在或已删除。"})
         title = d.title
-        await service.soft_delete_document(s, user, d)
+        d = await service.soft_delete_document(s, user, d)
         return _j({"ok": True, "id": doc_id, "title": title, "action": "trashed",
-                   "message": f"已删除 doc={doc_id}「{title}」（软删除，可用 memory_restore 恢复）。"})
+                   "persistence_status": public_persistence_status(d),
+                   "message": f"已删除 doc={doc_id}「{title}」（软删除，可用 memory_restore 恢复）。{_git_message(d)}"})
 
 
 @mcp.tool()
@@ -254,7 +303,8 @@ async def memory_restore(doc_id: int) -> str:
                        "message": f"doc={doc_id} 未被删除，无需恢复。"})
         d = await service.restore_document(s, user, d)
         return _j({"ok": True, "id": d.id, "title": d.title, "action": "restored",
-                   "message": f"已恢复 doc={d.id}「{d.title}」。"})
+                   "persistence_status": public_persistence_status(d),
+                   "message": f"已恢复 doc={d.id}「{d.title}」。{_git_message(d)}"})
 
 
 @mcp.tool()

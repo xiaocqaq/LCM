@@ -1,51 +1,85 @@
 #!/usr/bin/env bash
-# memorys 全量验收：十四套测试（单测本地 + 其余打公网 HTTPS）+ 服务状态 + 公网端点 + Hermes 侧闭环
-cd /opt/memorys || exit 1
-export PYTHONPATH=/opt/memorys
-export MEM_TEST_BASE=https://repo.xlingo.fun
-KEY=$(cat /root/.memorys-hermes-key)
+# Safe by default. See --help for unit / isolated integration / public layers.
 
 run() {
   local name="$1"; shift
-  local out
-  out=$("$@" 2>&1)
-  printf '%-22s FAIL=%s  %s\n' "$name" "$(echo "$out" | grep -c '^\[FAIL\]')" "$(echo "$out" | tail -1)"
+  local out status=0
+  out=$("$@" 2>&1) || status=$?
+  printf '%s\n' "$out"
+  printf '%-22s exit=%s\n' "$name" "$status"
+  return "$status"
 }
 
-echo "===== 测试套件 ====="
-run search_unit_test    .venv/bin/python tests/search_unit_test.py
-run recall_public       .venv/bin/python tests/recall_public.py
-run e2e_test            .venv/bin/python tests/e2e_test.py
-run mcp_test            .venv/bin/python tests/mcp_test.py
-run upstream_token_test .venv/bin/python tests/upstream_token_test.py
-run public_mcp_test     .venv/bin/python tests/public_mcp_test.py "$KEY"
-run git_push_test       .venv/bin/python tests/git_push_test.py
-run branch_test         .venv/bin/python tests/branch_test.py
-run branch_write_test   .venv/bin/python tests/branch_write_test.py
-run bootstrap_budget    .venv/bin/python tests/bootstrap_budget_test.py
-run rank_test           .venv/bin/python tests/rank_test.py
-run vec_search          .venv/bin/python tests/vec_search_test.py
-run links_test          .venv/bin/python tests/links_test.py
-run smoke_ready         .venv/bin/python tests/smoke_ready.py
+main() (
+  set -euo pipefail
+  cd "$(dirname "${BASH_SOURCE[0]}")/.."
+  local mode="${1:---unit}" python="${PYTHON:-python3}"
+  case "$mode" in
+    --help|-h)
+      printf '%s\n' \
+        'bash tests/acceptance.sh [--unit|--integration|--public-readonly|--legacy-write]' \
+        'Unit (default): reliability tests excluding integration; frontend node tests.' \
+        'Integration: same suites including integration; disposable local PG + pgvector required.' \
+        '  Set MEM_TEST_DATABASE_URL=postgresql+asyncpg://USER:PASS@127.0.0.1:PORT/memorys_test' \
+        '  Never point this at an existing database; integration fixtures may create/drop tables.' \
+        'Both local modes replace inherited application settings and use temporary data/env files.' \
+        'Public read-only: explicitly set MEM_PUBLIC_BASE=https://YOUR_HOST; GET health/docs only.' \
+        'Legacy write: MEM_ALLOW_LEGACY_WRITE=1 plus MEM_PUBLIC_BASE and MEM_TEST_API_KEY.' \
+        '  Runs the historical public_mcp_test.py (writes documents!); use a disposable account.' \
+        '  No keys are minted or read from disk. Other historical scripts remain manual-only:' \
+        '  they may use production settings/credentials and are NOT safe pytest inputs.' \
+        'Offline runner contracts: bash scripts/check_acceptance_runner.sh'
+      return 0 ;;
+    --public-readonly|--legacy-write)
+      : "${MEM_PUBLIC_BASE:?explicit MEM_PUBLIC_BASE required}"
+      [[ "$MEM_PUBLIC_BASE" == https://* ]] || { printf 'HTTPS URL required\n' >&2; return 2; }
+      if [[ "$mode" == --public-readonly ]]; then
+        for path in /api/health / /api/docs; do
+          run "GET $path" curl --disable --fail --silent --show-error --max-time 20 \
+            --proto '=https' --output /dev/null "${MEM_PUBLIC_BASE%/}$path" || return $?
+        done
+      else
+        [[ "${MEM_ALLOW_LEGACY_WRITE:-}" == 1 ]] || { printf 'Legacy writes require MEM_ALLOW_LEGACY_WRITE=1\n' >&2; return 2; }
+        : "${MEM_TEST_API_KEY:?explicit disposable account API key required}"
+        export MEM_MCP_URL="${MEM_PUBLIC_BASE%/}/mcp/"
+        run legacy-public-mcp "$python" tests/public_mcp_test.py "$MEM_TEST_API_KEY" || return $?
+      fi
+      return 0 ;;
+    --unit|--integration) ;;
+    *) printf 'Unknown mode: %s (see --help)\n' "$mode" >&2; return 2 ;;
+  esac
 
-echo
-echo "===== 服务 / 自启 ====="
-printf 'enabled=%s active=%s\n' "$(systemctl is-enabled memorys)" "$(systemctl is-active memorys)"
+  local database='postgresql+asyncpg://fixture:fixture@127.0.0.1:1/memorys_test'
+  if [[ "$mode" == --integration ]]; then
+    database="${MEM_TEST_DATABASE_URL:?disposable local MEM_TEST_DATABASE_URL required}"
+    [[ "$database" =~ ^postgresql\+asyncpg://[^/@]+@(127\.0\.0\.1|localhost):[0-9]+/memorys_test(_[a-zA-Z0-9_]+)?$ ]] || {
+      printf 'Integration requires loopback PG and database memorys_test\n' >&2; return 2;
+    }
+  fi
+  local sandbox
+  sandbox=$(mktemp -d "${TMPDIR:-/tmp}/memorys-acceptance.XXXXXXXX")
+  trap 'rm -rf -- "$sandbox"' EXIT
+  # Discard inherited MEM_* configuration, including production endpoints and keys.
+  local variable
+  for variable in ${!MEM_@}; do unset "$variable"; done
+  : > "$sandbox/empty.env"
+  export MEM_ENV_FILE="$sandbox/empty.env" MEM_DATA_DIR="$sandbox/data"
+  export MEM_DATABASE_URL="$database" MEM_JWT_SECRET='isolated-acceptance-fixture-not-a-production-secret'
+  export MEM_UPSTREAM_BASE='' MEM_GITHUB_REMOTE='' MEM_EMBED_API_BASE='' MEM_EMBED_API_KEY=''
+  export PYTHONPATH="$PWD" PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
+  if [[ "$mode" == --integration ]]; then
+    export MEM_TEST_DATABASE_URL="$database"
+    run reliability "$python" -m pytest -p pytest_asyncio.plugin tests/reliability -q || return $?
+  else
+    run reliability "$python" -m pytest -p pytest_asyncio.plugin tests/reliability -q -m 'not integration' || return $?
+  fi
+  shopt -s nullglob
+  local frontend_tests=(tests/frontend/*.test.*)
+  ((${#frontend_tests[@]} > 0)) || { printf 'No frontend tests found\n' >&2; return 2; }
+  run frontend node --test "${frontend_tests[@]}" || return $?
+)
 
-echo
-echo "===== 公网端点 ====="
-for p in /api/health / /api/docs; do
-  printf '%-14s %s\n' "$p" "$(curl -s -o /dev/null -w '%{http_code}' "https://repo.xlingo.fun$p")"
-done
-printf '%-14s %s\n' "/mcp(noauth)" \
-  "$(curl -s -o /dev/null -w '%{http_code}' -X POST https://repo.xlingo.fun/mcp \
-      -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -d '{}')"
-printf '%-14s %s\n' "/mcp(key)" \
-  "$(curl -s -o /dev/null -w '%{http_code}' -X POST https://repo.xlingo.fun/mcp \
-      -H "X-Api-Key: $KEY" -H 'Content-Type: application/json' \
-      -H 'Accept: application/json, text/event-stream' \
-      -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}')"
-
-echo
-echo "===== Hermes 侧闭环 ====="
-hermes mcp test memorys 2>&1 | grep -E 'Connected|Tools discovered|failed'
+# Sourcing exposes run() without any setup, network access or test execution.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

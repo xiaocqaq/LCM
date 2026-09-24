@@ -80,22 +80,31 @@ async def authenticate_headers(authorization: str | None, api_key: str | None, s
 
     if authorization and authorization.lower().startswith("bearer "):
         token = authorization[7:].strip()
-        # 1) 本地 JWT
-        try:
-            claims = _decode(token, require_issuer=True)
-            user = await session.get(User, int(claims["sub"]))
-            if user:
-                return AuthContext(user=user, via="jwt-local")
-        except pyjwt.PyJWTError:
-            pass
-        # 2) xiaoai token（无 iss）
+        # Decode/verify once, then choose exactly one issuer namespace.
+        # A failed local lookup must never reinterpret user_id as an upstream ID.
         try:
             claims = _decode(token, require_issuer=False)
-        except pyjwt.PyJWTError:
-            claims = None
-        if claims and claims.get("token_type") == "access" and claims.get("user_id") is not None:
+            local = claims.get("iss") == ISSUER
+            if ("iss" in claims and not local) or claims.get("token_type") != "access":
+                raise ValueError("invalid issuer or token type")
+            raw_id = claims["sub" if local else "user_id"]
+            if isinstance(raw_id, bool) or not isinstance(raw_id, (str, int)):
+                raise ValueError("invalid identity")
+            if isinstance(raw_id, str) and (not raw_id.isascii() or not raw_id.isdigit()):
+                raise ValueError("invalid identity")
+            identity = int(raw_id)
+            if not 0 < identity <= (2147483647 if local else 9223372036854775807):
+                raise ValueError("invalid identity")
+        except (pyjwt.PyJWTError, KeyError, TypeError, ValueError, OverflowError):
+            raise HTTPException(401, "登录已过期或 token 无效") from None
+        if local:
+            user = await session.get(User, identity)
+            if user:
+                return AuthContext(user=user, via="jwt-local")
+            raise HTTPException(401, "登录已过期或 token 无效")
+        else:
             user = (
-                await session.execute(select(User).where(User.xiaoai_user_id == int(claims["user_id"])))
+                await session.execute(select(User).where(User.xiaoai_user_id == identity))
             ).scalar_one_or_none()
             if user:
                 return AuthContext(user=user, via="jwt-xiaoai")

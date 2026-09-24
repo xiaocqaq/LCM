@@ -2,12 +2,94 @@
 import asyncio
 import re
 import uuid
+import json
+import logging
+from contextvars import ContextVar
+from functools import wraps
+
+from .mutations import run_blocking, user_lock
+from .mdstore import atomic_write
+
+logger = logging.getLogger(__name__)
+_journal = ContextVar('mutation_journal', default=None)
+
+
+class _FileJournal:
+    """Only touched files are retained until the DB commits (not a crash WAL)."""
+    def __init__(self):
+        self.before = {}
+        self.committed = False
+
+    def remember(self, path):
+        if path not in self.before:
+            self.before[path] = path.read_bytes() if path.exists() else None
+
+    def rollback(self):
+        for path, content in reversed(list(self.before.items())):
+            if content is None:
+                path.unlink(missing_ok=True)
+            else:
+                atomic_write(path, content)
+
+
+def _write(path, content):
+    _journal.get().remember(path)
+    atomic_write(path, content)
+
+
+def _remove(path):
+    _journal.get().remember(path)
+    path.unlink(missing_ok=True)
+
+
+def _move(source, target):
+    _journal.get().remember(source)
+    _journal.get().remember(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    source.replace(target)
+
+
+def _mutation(fn):
+    @wraps(fn)
+    async def wrapped(session, user, *args, **kwargs):
+        async with user_lock(user.id):
+            journal = _FileJournal()
+            token = _journal.set(journal)
+            try:
+                return await fn(session, user, *args, **kwargs)
+            except (ConflictError, DuplicateError):
+                # These are raised before any write; keep loaded values available
+                # for the 409 payload (rollback would expire the identity map).
+                raise
+            except BaseException:
+                if not journal.committed:
+                    try:
+                        journal.rollback()
+                    finally:
+                        await session.rollback()
+                raise
+            finally:
+                _journal.reset(token)
+    return wrapped
+
+
+async def _persist(session, root, message, doc=None):
+    await session.commit()
+    _journal.get().committed = True
+    git = await run_blocking(gitsvc.try_commit_all, root, message)
+    status = {'disk': 'saved', 'database': 'saved', 'git': git,
+              'ok': git['ok'], 'retryable': not git['ok']}
+    if doc is not None:
+        await session.refresh(doc)
+        doc.persistence_status = status
+    return status
 from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlalchemy import delete, desc, func, select, text
 from sqlalchemy import update as sqlalchemy_update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 
 from . import gitsvc
 from . import links as links_mod
@@ -45,6 +127,12 @@ def _tsvector_literal(content: str) -> str:
 
 
 async def upsert_user_from_xiaoai(session: AsyncSession, u: dict) -> User:
+    """Serialize first-login inserts before a local user id exists."""
+    async with user_lock(-int(u["id"])):  # negative ids are external-identity locks
+        return await _upsert_user_from_xiaoai(session, u)
+
+
+async def _upsert_user_from_xiaoai(session: AsyncSession, u: dict) -> User:
     """按 xiaoai_user_id 同步/更新本地用户。"""
     xu = int(u["id"])
     user = (await session.execute(select(User).where(User.xiaoai_user_id == xu))).scalar_one_or_none()
@@ -65,10 +153,13 @@ async def upsert_user_from_xiaoai(session: AsyncSession, u: dict) -> User:
         user.role = str(u.get("role") or user.role)
     user.last_login_at = _now()
     await session.commit()
-    gitsvc.ensure_repo(settings.data_dir, user.id)
+    await session.refresh(user)
+    async with user_lock(user.id):
+        await run_blocking(gitsvc.ensure_repo, settings.data_dir, user.id)
     return user
 
 
+@_mutation
 async def create_document(session: AsyncSession, user: User, payload: dict) -> Document:
     title = (payload.get("title") or "untitled").strip()[:256]
     library = sanitize_slug(payload.get("library") or "main")
@@ -152,41 +243,49 @@ async def create_document(session: AsyncSession, user: User, payload: dict) -> D
         meta["links"] = links
     p = doc_path(settings.data_dir, user.id, library, slug)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(render_document(meta, content), encoding="utf-8")
+    doc.meta = dict(meta)
+    _write(p, render_document(meta, content))
     await _reindex_document(session, doc)
-    await session.commit()
-    gitsvc.try_commit_all(user_root(settings.data_dir, user.id), f"create: {title}")
+    await _persist(session, user_root(settings.data_dir, user.id), f"create: {title}", doc)
     # 未解析的 link 挂在实例上供上层回报。不抛异常 —— 关系写错了文档本身还是有效的，
     # 但也不能静默丢弃，否则用户以为 supersedes 生效了、旧文档其实还在检索里。
     doc.link_report = link_report  # type: ignore[attr-defined]
     return doc
 
 
-async def update_document(session: AsyncSession, user: User, doc: Document, payload: dict, expected_hash: str | None = None) -> Document:
+@_mutation
+async def update_document(session: AsyncSession, user: User, doc: Document, payload: dict, expected_hash: str | None = None, expected_revision: str | None = None) -> Document:
+    from .revisions import document_revision
+
+    # The mutation decorator holds the user lock; compare only refreshed state.
+    await session.refresh(doc)
+    if doc.deleted_at is not None:
+        raise ConflictError("文档已被删除，请刷新后重试")
+    if expected_revision is not None and expected_revision != document_revision(doc):
+        raise ConflictError("文档已被他人修改，请刷新后重试")
     if expected_hash and doc.content_hash and expected_hash != doc.content_hash:
         raise ConflictError("文档已被他人修改，请刷新后重试")
     root = user_root(settings.data_dir, user.id)
+    old_path = root / doc.rel_path
+    disk_meta = parse_document(old_path.read_text(encoding="utf-8"))[0] if old_path.exists() else {}
 
-    if "title" in payload and payload["title"]:
-        new_title = str(payload["title"]).strip()[:256]
-        if new_title != doc.title:
-            old_path = root / doc.rel_path
-            doc.title = new_title
-            new_slug = sanitize_slug(new_title)
-            if new_slug != doc.slug:
-                # slug 冲突检查
-                np = doc_path(settings.data_dir, user.id, doc.library, new_slug)
-                if np.exists() and np != old_path:
-                    i = 1
-                    while np.exists():
-                        i += 1
-                        new_slug = f"{sanitize_slug(new_title)}-{i}"
-                        np = doc_path(settings.data_dir, user.id, doc.library, new_slug)
-                doc.slug = new_slug
-                doc.rel_path = f"{doc.library}/{new_slug}.md"
-                if old_path.exists():
-                    old_path.unlink()
-    for k, col in [("type", "md_type"), ("project", "project"), ("importance", "importance"), ("source", "source"), ("tags", "tags"), ("library", "library")]:
+    if payload.get("title"):
+        doc.title = str(payload["title"]).strip()[:256]
+    library = sanitize_slug(payload.get("library") or doc.library)
+    base_slug = sanitize_slug(doc.title) if payload.get("title") else doc.slug
+    candidate = f"{library}/{base_slug}.md"
+    if candidate != doc.rel_path:
+        taken = set((await session.execute(select(Document.rel_path).where(
+            Document.user_id == user.id, Document.id != doc.id,
+            Document.library == library))).scalars())
+        slug, suffix = base_slug, 1
+        while candidate in taken or ((root / candidate).exists() and root / candidate != old_path):
+            suffix += 1
+            slug = f"{base_slug}-{suffix}"
+            candidate = f"{library}/{slug}.md"
+        doc.slug, doc.rel_path = slug, candidate
+    doc.library = library
+    for k, col in [("type", "md_type"), ("project", "project"), ("importance", "importance"), ("source", "source"), ("tags", "tags")]:
         if k in payload and payload[k] is not None:
             if k == "type":
                 if payload[k] in VALID_TYPES:
@@ -197,6 +296,8 @@ async def update_document(session: AsyncSession, user: User, doc: Document, payl
                 setattr(doc, col, payload[k])
     if "content" in payload and payload["content"] is not None:
         doc.content = str(payload["content"]).strip()
+    if "_append_content" in payload:
+        doc.content = (doc.content.rstrip() + "\n\n" + str(payload["_append_content"]).strip()).strip()
     link_report = None
     if "links" in payload:
         # 换 links 前先撤掉旧的 supersede 标记，否则被"取代"的文档永久隐身：
@@ -209,31 +310,22 @@ async def update_document(session: AsyncSession, user: User, doc: Document, payl
     doc.updated_at = _now()
     await session.flush()
 
-    # 重写 md（frontmatter 用当前 DB 元数据）
-    meta = {
-        "id": f"doc_{doc.id}",
-        "title": doc.title,
-        "type": doc.md_type,
-        "project": doc.project,
-        "tags": doc.tags,
-        "importance": doc.importance,
-        "source": doc.source,
-        "created_at": doc.created_at.strftime("%Y-%m-%dT%H:%M:%SZ") if doc.created_at else "",
-        "updated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-    }
-    if doc.links:
-        meta["links"] = doc.links
+    # Preserve on-disk extension keys and stable identity across edits/renames.
+    doc.meta = json.loads(json.dumps({**(doc.meta or {}), **disk_meta}, default=str))
+    meta = _doc_meta(doc)
     p = root / doc.rel_path
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(render_document(meta, doc.content), encoding="utf-8")
+    _write(p, render_document(meta, doc.content))
+    if old_path != p and old_path.exists():
+        _remove(old_path)
+    doc.meta = {**(doc.meta or {}), **meta}
     await _reindex_document(session, doc)
-    await session.commit()
-    gitsvc.try_commit_all(root, f"update: {doc.title}")
+    await _persist(session, root, f"update: {doc.title}", doc)
     if link_report is not None:
         doc.link_report = link_report  # type: ignore[attr-defined]
     return doc
 
 
+@_mutation
 async def write_to_branch(session: AsyncSession, user: User, payload: dict,
                           branch: str, doc: Document | None = None) -> dict:
     """把记忆写到**非当前分支**，不落盘、不进 DB。
@@ -246,8 +338,8 @@ async def write_to_branch(session: AsyncSession, user: User, payload: dict,
 
     doc 非空时是"另存到分支"：以该文档的路径和元数据为基础，套用 payload 的改动。
     """
-    root = gitsvc.ensure_repo(settings.data_dir, user.id)
-    cur = gitsvc.current_branch(root)
+    root = await run_blocking(gitsvc.ensure_repo, settings.data_dir, user.id)
+    cur = await run_blocking(gitsvc.current_branch, root)
     if branch == cur:
         raise ValueError("目标分支就是当前分支，直接正常保存即可")
 
@@ -267,7 +359,7 @@ async def write_to_branch(session: AsyncSession, user: User, payload: dict,
     rel_path = f"{library}/{slug}.md"
 
     # 目标分支上已有同路径文件 → 这次是更新，保留它原本的 created_at
-    existing = gitsvc.read_file_from_branch(root, branch, rel_path)
+    existing = await run_blocking(gitsvc.read_file_from_branch, root, branch, rel_path)
     created_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     if existing:
         try:
@@ -288,9 +380,11 @@ async def write_to_branch(session: AsyncSession, user: User, payload: dict,
         "updated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
     verb = "update" if existing else "create"
-    res = gitsvc.commit_file_to_branch(
+    res = await run_blocking(gitsvc.commit_file_to_branch,
         root, branch, rel_path, render_document(meta, content),
         f"{verb}: {title} [分支 {branch}]")
+    if not res.get("ok"):
+        return res
     res.update({
         "title": title, "rel_path": rel_path, "action": verb,
         "current_branch": cur,
@@ -300,6 +394,7 @@ async def write_to_branch(session: AsyncSession, user: User, payload: dict,
     return res
 
 
+@_mutation
 async def soft_delete_document(session: AsyncSession, user: User, doc: Document) -> Document:
     """软删除：md 文件移进 .trash/，DB 行打 deleted_at，chunk 一并删掉。
 
@@ -307,6 +402,7 @@ async def soft_delete_document(session: AsyncSession, user: User, doc: Document)
     让"多少 chunk 有向量"这类统计失真，也白占 pgvector 的存储和 hnsw 索引。
     要恢复的话 restore 会重新 reindex，chunk 本来就是可重建的派生数据。
     """
+    await session.refresh(doc)
     doc.deleted_at = _now()
     await session.execute(delete(Chunk).where(Chunk.document_id == doc.id))
     # 删掉一篇"取代者"之后，被它取代的文档必须重新可见 ——
@@ -318,26 +414,27 @@ async def soft_delete_document(session: AsyncSession, user: User, doc: Document)
     if p.exists():
         trash = root / ".trash"
         trash.mkdir(parents=True, exist_ok=True)
-        p.rename(trash / f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{p.name}")
-    await session.commit()
-    gitsvc.try_commit_all(root, f"delete: {doc.title}")
+        _move(p, trash / f"{doc.id}_{uuid.uuid4().hex}_{p.name}")
+    await _persist(session, root, f"delete: {doc.title}", doc)
     return doc
 
 
+@_mutation
 async def restore_document(session: AsyncSession, user: User, doc: Document) -> Document:
+    await session.refresh(doc)
     doc.deleted_at = None
     await session.flush()
     root = user_root(settings.data_dir, user.id)
     p = root / doc.rel_path
     if not p.exists():
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(render_document(_doc_meta(doc), doc.content), encoding="utf-8")
+        _write(p, render_document(_doc_meta(doc), doc.content))
     await _reindex_document(session, doc)
-    await session.commit()
-    gitsvc.try_commit_all(root, f"restore: {doc.title}")
+    await _persist(session, root, f"restore: {doc.title}", doc)
     return doc
 
 
+@_mutation
 async def soft_delete_project(session: AsyncSession, user: User, project: str,
                               library: str | None = None) -> dict:
     """把一个项目下的所有文档移进回收站。
@@ -373,13 +470,13 @@ async def soft_delete_project(session: AsyncSession, user: User, project: str,
         p = root / doc.rel_path
         if p.exists():
             trash.mkdir(parents=True, exist_ok=True)
-            p.rename(trash / f"{stamp}_{p.name}")
-    await session.commit()
+            _move(p, trash / f"{doc.id}_{uuid.uuid4().hex}_{p.name}")
     label = project or "未归项目"
-    gitsvc.try_commit_all(root, f"delete project: {label}（{len(docs)} 篇）")
-    return {"deleted": len(docs), "titles": titles}
+    status = await _persist(session, root, f"delete project: {label}（{len(docs)} 篇）")
+    return {"deleted": len(docs), "titles": titles, "persistence_status": status}
 
 
+@_mutation
 async def empty_trash(session: AsyncSession, user: User) -> dict:
     """清空回收站：DB 行真删 + .trash/ 下的 md 真删。不可恢复（除了翻 git 历史）。
 
@@ -412,96 +509,82 @@ async def empty_trash(session: AsyncSession, user: User) -> dict:
     if trash.exists():
         for f in sorted(trash.iterdir()):
             if f.is_file():
-                f.unlink()
+                _remove(f)
                 removed_files += 1
 
-    await session.commit()
-    if docs or removed_files:
-        gitsvc.try_commit_all(
-            root, f"purge trash: {len(docs)} 篇 / {removed_files} 个文件")
-    return {"purged": len(docs), "files": removed_files}
+    status = await _persist(session, root, f"purge trash: {len(docs)} 篇 / {removed_files} 个文件")
+    return {"purged": len(docs), "files": removed_files, "persistence_status": status}
 
 
 def _doc_meta(doc: Document) -> dict:
     return {
-        "id": f"doc_{doc.id}",
+        **{k: v for k, v in (doc.meta or {}).items() if k != "_memorys_vectors"},
+        "id": (doc.meta or {}).get("id") or f"doc_{doc.id}",
         "title": doc.title,
         "type": doc.md_type,
         "project": doc.project,
         "tags": doc.tags,
         "importance": doc.importance,
         "source": doc.source,
+        "links": doc.links or [],
         "created_at": doc.created_at.strftime("%Y-%m-%dT%H:%M:%SZ") if doc.created_at else "",
         "updated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
 
 
+EMBED_PREPROCESS_VERSION = "title-heading-body-v1"
+
+
+def _embedding_fingerprint(full_input):
+    return compute_hash(json.dumps([
+        full_input, settings.embed_model, settings.embed_api_base.rstrip("/"),
+        settings.embed_dim, settings.embed_max_chars, EMBED_PREPROCESS_VERSION,
+    ], ensure_ascii=False))
+
+
 async def _reindex_document(session: AsyncSession, doc: Document, do_embed: bool = True) -> None:
-    """删旧 chunk，重切、重分词，重插。向量按内容复用，只对新内容调上游。
+    """Reuse only vectors with proven identical full input AND provider config.
 
-    向量复用是必须的，不是优化：一次全量 reindex 要给每个 chunk 调一次
-    embedding 上游，而这个上游会随机 ReadTimeout（重试要等 30s+）。
-    实测 23 篇文档全量 reindex 超过 7 分钟，直接把 `POST /api/v1/sync` 打成超时。
-    而绝大多数 chunk 的文本根本没变 —— 切分规则一样、正文一样，就该沿用旧向量。
-
-    复用的键是 chunk 正文本身（不是 seq）：加一节内容会让后面所有 chunk 的 seq
-    整体位移，按 seq 复用等于把向量和内容错配，检索会返回莫名其妙的结果。
-
-    do_embed=False 时只跳过"给新内容算向量"，已有向量仍然保留 ——
-    早先的实现是先 DELETE 再重插、向量一起没，拿它刷同义词清空过全库向量。
+    Legacy vectors without provenance are deliberately not reused. do_embed=False
+    retains matching vectors but never labels stale vectors as current.
     """
-    # 先取旧 chunk 的 (内容 → 向量)。用原始 SQL 读 embedding 列的文本形式，
-    # ORM 那边这一列是 Text（启动时 ALTER 成 vector），走 ORM 会拿到 str 或 None。
-    old_vecs: dict[str, str] = {}
+    provenance = (doc.meta or {}).get("_memorys_vectors", {})
+    old_vecs = {}
     rows = (await session.execute(
-        text("SELECT content, embedding::text FROM chunks "
-             "WHERE document_id = :d AND embedding IS NOT NULL"),
-        {"d": doc.id},
+        text("SELECT seq, content, heading, embedding::text FROM chunks "
+             "WHERE document_id = :d AND embedding IS NOT NULL"), {"d": doc.id},
     )).all()
-    for content_, vec_ in rows:
-        if content_ and vec_:
-            old_vecs[content_] = vec_
-
-    await session.execute(delete(Chunk).where(Chunk.document_id == doc.id))
-    pieces = split_chunks(doc.content)
-    if not pieces:
-        # 空内容也保留一个 chunk，防止文档整体消失
-        pieces = [{"heading": "", "content": doc.content}]
-
-    # 只给"旧向量里没有的内容"调上游
-    need_idx = [i for i, p in enumerate(pieces) if p["content"] not in old_vecs]
-    fresh: dict[int, list[float]] = {}
+    for seq, content, heading, vec in rows:
+        key = provenance.get(str(seq))
+        if key and vec:
+            old_vecs[key] = vec
+    pieces = split_chunks(doc.content) or [{"heading": "", "content": doc.content}]
+    inputs = [f"{doc.title}\n{p['heading']}\n{p['content']}" for p in pieces]
+    keys = [_embedding_fingerprint(value) for value in inputs]
+    need_idx = [i for i, key in enumerate(keys) if key not in old_vecs]
+    fresh = {}
     if do_embed and need_idx:
-        got = await embed_texts(
-            [f"{doc.title}\n{pieces[i]['heading']}\n{pieces[i]['content']}" for i in need_idx])
+        got = await embed_texts([inputs[i] for i in need_idx])
         if got:
-            for slot, i in enumerate(need_idx):
-                v = got[slot] if slot < len(got) else None
-                # 维度不符的单独剔掉而不是整批丢：hnsw 索引建在固定维度上，
-                # 混入别的维度写入会被 pgvector 拒，但没理由因为一条坏的放弃其余好的。
-                if v and len(v) == settings.embed_dim:
-                    fresh[i] = v
-
-    for seq, p in enumerate(pieces):
-        lex = _tsvector_literal(f"{doc.title} {doc.project} {' '.join(doc.tags or [])} {p['heading']} {p['content']}")
-        ch = Chunk(document_id=doc.id, seq=seq, heading=p["heading"], content=p["content"])
+            for i, vec in zip(need_idx, got):
+                if vec and len(vec) == settings.embed_dim:
+                    fresh[i] = "[" + ",".join(f"{x:.6f}" for x in vec) + "]"
+    await session.execute(delete(Chunk).where(Chunk.document_id == doc.id))
+    saved_keys = {}
+    for seq, piece in enumerate(pieces):
+        lex = _tsvector_literal(f"{doc.title} {doc.project} {' '.join(doc.tags or [])} {piece['heading']} {piece['content']}")
+        ch = Chunk(document_id=doc.id, seq=seq, heading=piece["heading"], content=piece["content"])
         session.add(ch)
         await session.flush()
-        await session.execute(
-            text("UPDATE chunks SET tsv = to_tsvector('simple', :lex) WHERE id = :id"),
-            {"lex": lex, "id": ch.id},
-        )
-        reuse = old_vecs.get(p["content"])
-        if reuse:
+        await session.execute(text("UPDATE chunks SET tsv = to_tsvector('simple', :lex) WHERE id = :id"),
+                              {"lex": lex, "id": ch.id})
+        vec = old_vecs.get(keys[seq]) or fresh.get(seq)
+        if vec:
             await session.execute(
                 text(f"UPDATE chunks SET embedding = CAST(:vec AS vector({settings.embed_dim})) WHERE id = :id"),
-                {"vec": reuse, "id": ch.id},
-            )
-        elif seq in fresh:
-            await session.execute(
-                text(f"UPDATE chunks SET embedding = CAST(:vec AS vector({settings.embed_dim})) WHERE id = :id"),
-                {"vec": "[" + ",".join(f"{x:.6f}" for x in fresh[seq]) + "]", "id": ch.id},
-            )
+                {"vec": vec, "id": ch.id})
+            saved_keys[str(seq)] = keys[seq]
+    doc.meta = {**(doc.meta or {}), "_memorys_vectors": saved_keys}
 
 
 async def _bump_access(doc_ids: list[int]) -> None:
@@ -786,107 +869,123 @@ async def bootstrap_context(session: AsyncSession, user: User, project: str | No
     docs.sort(key=lambda d: (TYPE_PRIORITY.get(d.md_type, 9), -eff_importance(d),
                              -(d.updated_at.timestamp() if d.updated_at else 0)))
 
-    # 预算下限：低于这个数拼不出有意义的上下文，还不如报错让调用方改
-    token_budget = max(200, int(token_budget))
-    META_COST = 30          # 标题/类型/标签那几行的开销
-    MIN_SLICE = 120         # 截断后至少留这么多 token，否则这篇没有信息量，不如不收
+    # Budget the complete JSON payload, including duplicated digest and metadata.
+    # This is a documented heuristic, not a model tokenizer or an LLM summary.
+    token_budget = max(400, int(token_budget))
+    picked = []
+    linked_extra = []
 
-    def est_tokens(s: str) -> int:
-        # 中文 ~1 token/字，英文 ~0.75 token/词：粗略 1.7 字/token 或 len*0.7
-        return max(1, int(len(s) * 0.85))
+    def payload():
+        result = {
+            "project": project or "",
+            "scope": f"project:{project}" if project else "library:main",
+            "scope_label": f"项目 {project}" if project else "main 库全部",
+            "token_budget": token_budget, "estimated_tokens": 0,
+            "token_estimate_method": "heuristic-json-chars-v1",
+            "document_count": len(picked), "total_documents": len(docs),
+            "linked_extra": linked_extra,
+            "digest": "\n".join(f"[{e['type']}] {e['title']}: {e['content'][:120]}" for e in picked),
+            "documents": picked,
+        }
+        # Fixed point includes the digits of the estimate itself.
+        for _ in range(5):
+            result["estimated_tokens"] = (len(json.dumps(result, ensure_ascii=False)) * 85 + 99) // 100
+        return result
 
-    def chars_for(tok: int) -> int:
-        # est_tokens 的反函数，用来按剩余预算切内容
-        return max(1, int(tok / 0.85))
+    def add_document(doc, limit, via=None):
+        body = doc.content or ""
+        entry = {"id": doc.id, "title": doc.title, "type": doc.md_type,
+                 "project": doc.project, "tags": doc.tags, "importance": doc.importance,
+                 "content": "", "truncated": bool(body)}
+        if via:
+            entry["via"] = via
+        picked.append(entry)
+        lo, hi = 0, min(len(body), 4000)
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            entry.update(content=body[:mid], truncated=mid < len(body))
+            if payload()["estimated_tokens"] <= limit:
+                lo = mid
+            else:
+                hi = mid - 1
+        entry.update(content=body[:lo], truncated=lo < len(body))
+        if (body and lo < min(40, len(body))) or payload()["estimated_tokens"] > limit:
+            picked.pop()
+            return False
+        return True
 
-    PER_DOC_CHARS = 4000    # 单篇上限，防一篇超长文吃掉整个预算
-
-    used = 0
-    picked: list[dict] = []
-    for d in docs:
-        left = token_budget - used
-        if left <= META_COST + MIN_SLICE:
-            break               # 剩余空间连一段有意义的摘录都放不下，收工
-        body = d.content or ""
-        head = body[:PER_DOC_CHARS]
-        if est_tokens(head) + META_COST <= left:
-            # 放得下（可能仍因 PER_DOC_CHARS 上限而截断，那跟预算无关，继续收下一篇）
-            content = head
-            budget_capped = False
-        else:
-            # 放不下就按剩余预算切。
-            # 原来这里是 `continue`（跳过这篇去看下一篇），导致两个问题：
-            #   1) 排序失效 —— 收进来的是"能塞进缝隙的小文档"而不是"最重要的前 N 篇"
-            #   2) 配合 `and picked` 的短路，首篇永远无条件全量收录，
-            #      预算填 100 也能返回 3430 tokens
-            content = body[:chars_for(left - META_COST)]
-            budget_capped = True
-        picked.append({
-            "id": d.id, "title": d.title, "type": d.md_type, "project": d.project,
-            "tags": d.tags, "importance": d.importance,
-            "content": content, "truncated": len(content) < len(body),
-        })
-        used += est_tokens(content) + META_COST
-        # 只有"被预算卡住"才停。因 PER_DOC_CHARS 截断不算 —— 那时预算还有富余，
-        # 后面的文档照样能收（这里判断错会让大预算也只返回 1 篇）。
-        if budget_capped:
+    # Reserve a fair share for one representative of each essential type before
+    # allowing multiple long summaries to consume the pack.
+    seeds = []
+    for kind in ("project_summary", "decision", "preference"):
+        candidate = next((d for d in docs if d.md_type == kind), None)
+        if candidate is not None:
+            seeds.append(candidate)
+    seeded = {d.id for d in seeds}
+    for i, doc in enumerate(seeds):
+        used = payload()["estimated_tokens"]
+        quota = used + (token_budget - used) // (len(seeds) - i)
+        # At tiny budgets priority wins; diversity is guaranteed only when useful
+        # excerpts AND each document's metadata can actually fit.
+        if not add_document(doc, quota):
+            add_document(doc, token_budget)
             break
-    # ── 关系补充：把 implements 关联的文档带进来 ──
-    # 命中一篇实现记录时，背后的决策文档往往才是 agent 真正需要的
-    # （"为什么这么做"比"怎么做的"更难从代码重建）。反之亦然。
-    # 只在预算还有余量时补，且明确标注 via="implements"，
-    # 让 agent 知道这几篇不是按重要度选出来的，而是被关联带出来的。
-    linked_extra: list[dict] = []
-    left = token_budget - used
-    if picked and left > META_COST + MIN_SLICE:
-        extras = await links_mod.expand_by_links(
-            session, user, [e["id"] for e in picked], max_extra=3)
-        chosen = {e["id"] for e in picked}
-        for d in extras:
-            if d.id in chosen:
-                continue
-            left = token_budget - used
-            if left <= META_COST + MIN_SLICE:
+    for doc in docs:
+        if doc.id not in seeded:
+            if not add_document(doc, token_budget):
                 break
-            body = d.content or ""
-            content = body[:min(PER_DOC_CHARS, chars_for(left - META_COST))]
-            entry = {
-                "id": d.id, "title": d.title, "type": d.md_type, "project": d.project,
-                "tags": d.tags, "importance": d.importance,
-                "content": content, "truncated": len(content) < len(body),
-                "via": "implements",
-            }
-            picked.append(entry)
-            linked_extra.append({"id": d.id, "title": d.title})
-            used += est_tokens(content) + META_COST
-
-    # digest 是给 agent 直接塞进开场的，也得守预算 —— 它不能比 documents 还长
-    digest_parts: list[str] = []
-    dused = 0
-    for e in picked:
-        part = f"[{e['type']}] {e['title']}: {e['content'][:200]}"
-        c = est_tokens(part)
-        if dused + c > token_budget and digest_parts:
-            break
-        digest_parts.append(part)
-        dused += c
-    return {
-        # project 留空时是「main 库全部」，不能把库名回填成项目名，否则
-        # 调用方会以为存在一个叫 main 的项目。scope 明确区分两种范围。
-        "project": project or "",
-        "scope": f"project:{project}" if project else "library:main",
-        "scope_label": f"项目 {project}" if project else "main 库全部",
-        "token_budget": token_budget,
-        "estimated_tokens": used,
-        "document_count": len(picked),
-        "total_documents": len(docs),
-        # 哪几篇是被 implements 关系带出来的（不是按重要度选的）
-        "linked_extra": linked_extra,
-        "digest": "\n".join(digest_parts),
-        "documents": picked,
-    }
+    if picked and token_budget - payload()["estimated_tokens"] > 300:
+        extras = await links_mod.expand_by_links(session, user, [e["id"] for e in picked], max_extra=3)
+        chosen = {e["id"] for e in picked}
+        for doc in extras:
+            if doc.id in chosen:
+                continue
+            linked_extra.append({"id": doc.id, "title": doc.title})
+            if not add_document(doc, token_budget, via="implements"):
+                linked_extra.pop()
+                break
+            chosen.add(doc.id)
+    result = payload()
+    if result["estimated_tokens"] > token_budget:
+        raise ValueError("token_budget 太小，连上下文元信息都无法容纳")
+    return result
 
 
+def _disk_fields(meta, content, library, slug):
+    def date_value(key):
+        value = meta.get(key)
+        try:
+            result = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            return result if result.tzinfo else result.replace(tzinfo=timezone.utc)
+        except (ValueError, TypeError):
+            return None
+
+    try:
+        importance = max(1, min(5, int(meta.get("importance") or 3)))
+    except (ValueError, TypeError):
+        importance = 3
+    tags = meta.get("tags") or []
+    if not isinstance(tags, list):
+        tags = [tags]
+    # YAML timestamps are datetime objects; JSONB needs a JSON-safe representation.
+    extras = json.loads(json.dumps(meta, default=str))
+    extras.pop("_memorys_vectors", None)  # never trust cache provenance from Markdown
+    fields = dict(library=library, slug=slug, rel_path=f"{library}/{slug}.md",
+                  title=str(meta.get("title") or slug)[:256],
+                  md_type=meta.get("type") if meta.get("type") in VALID_TYPES else "fact",
+                  project=str(meta.get("project") or "")[:128],
+                  tags=[str(t)[:32] for t in tags][:16], importance=importance,
+                  source=str(meta.get("source") or "disk")[:64],
+                  links=normalize_links(meta.get("links")), content=content,
+                  content_hash=compute_hash(content), meta=extras)
+    for key in ("created_at", "updated_at"):
+        parsed = date_value(key)
+        if parsed is not None:
+            fields[key] = parsed
+    return fields
+
+
+@_mutation
 async def sync_from_disk(session: AsyncSession, user: User) -> dict:
     """磁盘 → DB：扫 md 文件重建索引（含 git pull 后）。返回统计。"""
     root = user_root(settings.data_dir, user.id)
@@ -894,6 +993,8 @@ async def sync_from_disk(session: AsyncSession, user: User) -> dict:
     # links 要在全部文档都进 DB 之后再统一解析 —— 关系可能指向本次 sync
     # 里更靠后才扫到的文件，边扫边解析会有一半解析不出来。
     link_dirty: list[Document] = []
+    disk_timestamps = {}
+    root.mkdir(parents=True, exist_ok=True)
     lib_dirs = [p for p in root.iterdir() if p.is_dir() and not p.name.startswith(".")]
     for lib in lib_dirs:
         for f in lib.glob("*.md"):
@@ -908,39 +1009,25 @@ async def sync_from_disk(session: AsyncSession, user: User) -> dict:
                     select(Document).where(Document.user_id == user.id, Document.rel_path == rel + ".md")
                 )
             ).scalar_one_or_none()
-            h = compute_hash(content)
-            if doc and doc.deleted_at:
-                # 从磁盘恢复（用户在别的机器 push 过）
-                doc.deleted_at = None
-                doc.links = normalize_links(meta.get("links"))
-                updated += 1
-            elif doc:
-                if doc.content_hash != h or doc.content != content:
-                    doc.content = content
-                    doc.title = title
-                    doc.content_hash = h
-                    doc.links = normalize_links(meta.get("links"))
-                    doc.updated_at = _now()
-                    updated += 1
-                else:
-                    # 内容没变但 frontmatter 的 links 可能改了（手改 md 或从别处 pull）
-                    fm_links = normalize_links(meta.get("links"))
-                    if fm_links != (doc.links or []):
-                        doc.links = fm_links
-                        updated += 1
-                        link_dirty.append(doc)
+            fields = _disk_fields(meta, content, lib.name, f.stem)
+            if "updated_at" in fields:
+                disk_timestamps[rel + ".md"] = fields["updated_at"]
+            if doc:
+                changed = doc.deleted_at is not None or any(
+                    getattr(doc, key) != value for key, value in fields.items() if key != "meta")
+                old_meta = {k: v for k, v in (doc.meta or {}).items() if k != "_memorys_vectors"}
+                changed = changed or old_meta != fields["meta"]
+                if not changed:
                     continue
+                cache = (doc.meta or {}).get("_memorys_vectors")
+                if cache:
+                    fields["meta"]["_memorys_vectors"] = cache
+                for key, value in fields.items():
+                    setattr(doc, key, value)
+                doc.deleted_at = None
+                updated += 1
             else:
-                doc = Document(
-                    user_id=user.id, library=lib.name, slug=f.stem, title=title,
-                    md_type=str(meta.get("type")) if str(meta.get("type")) in VALID_TYPES else "fact",
-                    project=str(meta.get("project") or "")[:128],
-                    tags=[str(t)[:32] for t in (meta.get("tags") or [])][:16],
-                    importance=max(1, min(5, int(meta.get("importance") or 3))),
-                    source=str(meta.get("source") or "disk")[:64],
-                    links=normalize_links(meta.get("links")),
-                    content=content, rel_path=rel + ".md", content_hash=h,
-                )
+                doc = Document(user_id=user.id, **fields)
                 session.add(doc)
                 added += 1
             await session.flush()
@@ -960,6 +1047,7 @@ async def sync_from_disk(session: AsyncSession, user: User) -> dict:
             d.deleted_at = _now()
             # 消失的文档如果曾经取代过别的文档，被取代者要重新可见
             await links_mod.clear_supersede_marks(session, d)
+            await session.execute(delete(Chunk).where(Chunk.document_id == d.id))
             removed += 1
     await session.flush()
 
@@ -967,7 +1055,7 @@ async def sync_from_disk(session: AsyncSession, user: User) -> dict:
     # 先清空所有 supersede 标记再重建，而不是增量改：md 是 source of truth，
     # 磁盘上没有的关系就不该在 DB 里留着。增量更新会让删掉一行 links 之后
     # 目标文档永久隐身。
-    if link_dirty:
+    if link_dirty or removed:
         for d in (await session.execute(select(Document).where(
                 Document.user_id == user.id,
                 Document.superseded_by.is_not(None)))).scalars().all():
@@ -985,7 +1073,16 @@ async def sync_from_disk(session: AsyncSession, user: User) -> dict:
     else:
         link_unresolved = []
 
+    # Cache provenance and relation marks are derived state. Flush their writes
+    # first, then restore authored timestamps so ORM onupdate cannot turn a disk
+    # rebuild into a user edit (or make every subsequent sync look changed).
+    await session.flush()
+    for rel_path, stamp in disk_timestamps.items():
+        await session.execute(sqlalchemy_update(Document).where(
+            Document.user_id == user.id, Document.rel_path == rel_path,
+            Document.deleted_at.is_(None)).values(updated_at=stamp))
     await session.commit()
+    _journal.get().committed = True
     return {"added": added, "updated": updated, "removed": removed,
             "link_unresolved": link_unresolved}
 

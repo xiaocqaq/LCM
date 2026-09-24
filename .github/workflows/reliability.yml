@@ -1,0 +1,61 @@
+name: Isolated reliability tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  reliability:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: memorys_test
+          POSTGRES_PASSWORD: disposable-ci-password
+          POSTGRES_DB: memorys_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U memorys_test -d memorys_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      MEM_ENV_FILE: ''
+      MEM_DATA_DIR: ${{ runner.temp }}/memorys-ci
+      MEM_TEST_DATABASE_URL: postgresql+asyncpg://memorys_test:disposable-ci-password@127.0.0.1:5432/memorys_test
+      MEM_JWT_SECRET: disposable-ci-signing-secret-never-production
+      MEM_EMBED_API_BASE: ''
+      MEM_EMBED_API_KEY: ''
+      MEM_GITHUB_REMOTE: ''
+      MEM_UPSTREAM_BASE: ''
+      PGHOST: 127.0.0.1
+      PGPORT: '5432'
+      PGUSER: memorys_test
+      PGPASSWORD: disposable-ci-password
+      PGDATABASE: memorys_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: requirements.lock
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install locked runtime and test dependencies
+        # Generate requirements.lock from requirements-dev.txt, including runtime.
+        run: python -m pip install -r requirements.lock
+      - name: Dependency-free acceptance runner regression
+        run: bash scripts/check_acceptance_runner.sh
+      - name: Enable extensions in the disposable database only
+        run: psql -v ON_ERROR_STOP=1 -c 'CREATE EXTENSION IF NOT EXISTS vector; CREATE EXTENSION IF NOT EXISTS pg_trgm;'
+      - name: Reliability integration and frontend node tests
+        # acceptance.sh creates/removes a fresh sandbox and never imports legacy scripts.
+        run: bash tests/acceptance.sh --integration

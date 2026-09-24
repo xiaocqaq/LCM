@@ -4,6 +4,7 @@
 早先版本把 jwt_secret 和数据库密码写成了代码默认值，等于把生产凭据提交进仓库；
 现在改成空默认 + 启动时校验，缺了就直接起不来，而不是悄悄用一个已泄露的值。
 """
+import os
 import sys
 
 from pydantic_settings import BaseSettings
@@ -51,7 +52,9 @@ class Settings(BaseSettings):
     # 逗号分隔，支持 host:* 通配。
     mcp_allowed_hosts: str = "127.0.0.1:*,localhost:*,[::1]:*"
 
-    model_config = {"env_file": "/opt/memorys/.env", "env_prefix": "MEM_", "extra": "ignore"}
+    # Tests and preview instances explicitly opt out of the production env file.
+    model_config = {"env_file": os.environ.get("MEM_ENV_FILE", "/opt/memorys/.env") or None,
+                    "env_prefix": "MEM_", "extra": "ignore"}
 
 
 settings = Settings()

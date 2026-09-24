@@ -7,6 +7,12 @@
 from __future__ import annotations
 
 import json
+import logging
+import uuid
+
+from fastapi import HTTPException
+
+logger = logging.getLogger(__name__)
 
 from .db import SessionLocal
 from .mcp_server import current_auth, mcp
@@ -22,15 +28,16 @@ def _headers(scope) -> dict[str, str]:
     return {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])}
 
 
-async def _send_401(send, msg: str) -> None:
-    body = json.dumps({"detail": msg}, ensure_ascii=False).encode()
+async def _send_error(send, status: int, msg: str, request_id: str) -> None:
+    body = json.dumps({"detail": msg, "requestId": request_id}, ensure_ascii=False).encode()
     await send({
         "type": "http.response.start",
-        "status": 401,
+        "status": status,
         "headers": [
             (b"content-type", b"application/json; charset=utf-8"),
             (b"content-length", str(len(body)).encode()),
-            (b"www-authenticate", b'Bearer realm="memorys"'),
+            (b"x-request-id", request_id.encode()),
+            *([(b"www-authenticate", b'Bearer realm="memorys"')] if status == 401 else []),
         ],
     })
     await send({"type": "http.response.body", "body": body})
@@ -57,16 +64,20 @@ async def mcp_asgi_app(scope, receive, send):
 
     scope = _normalize(scope)
     h = _headers(scope)
+    request_id = uuid.uuid4().hex
     try:
         async with SessionLocal() as s:
             ctx = await authenticate_headers(h.get("authorization"), h.get("x-api-key"), s)
     except Exception as e:
-        detail = getattr(e, "detail", None) or str(e) or "认证失败"
-        await _send_401(send, f"MCP 认证失败：{detail}")
+        if isinstance(e, HTTPException) and e.status_code == 401:
+            await _send_error(send, 401, AUTH_HINT, request_id)
+        else:
+            logger.exception("MCP authentication unavailable request_id=%s", request_id)
+            await _send_error(send, 503, "认证服务暂不可用", request_id)
         return
 
     if ctx is None or getattr(ctx, "user", None) is None:
-        await _send_401(send, AUTH_HINT)
+        await _send_error(send, 401, AUTH_HINT, request_id)
         return
 
     token = current_auth.set(ctx)

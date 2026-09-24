@@ -2,6 +2,9 @@
 写入即提交（失败不阻断主流程），sync 负责推 GitHub 长期备份。
 """
 import os
+import logging
+
+logger = logging.getLogger(__name__)
 import re
 import subprocess
 from pathlib import Path
@@ -40,11 +43,15 @@ def commit_all(root: Path, message: str) -> str | None:
     return _git(root, "rev-parse", "--short", "HEAD")
 
 
-def try_commit_all(root: Path, message: str) -> str | None:
+def try_commit_all(root: Path, message: str) -> dict:
+    """A failed version snapshot is distinct from a clean worktree."""
     try:
-        return commit_all(root, message)
-    except Exception:
-        return None
+        commit = commit_all(root, message)
+        return {"ok": True, "status": "committed" if commit else "unchanged", "commit": commit}
+    except Exception as exc:
+        logger.exception("Git persistence failed for %s", root)
+        return {"ok": False, "status": "failed", "commit": None,
+                "error": str(exc)[:400], "retryable": True}
 
 
 def history(root: Path, rel_path: str, limit: int = 20) -> list[dict]:
@@ -175,7 +182,9 @@ def create_branch(root: Path, name: str, switch: bool = True) -> dict:
     if name in existing:
         raise ValueError(f"分支 {name} 已存在")
     # 未提交的改动先落一笔，否则切分支会把它们带过去，造成归属混乱
-    try_commit_all(root, "wip: 建分支前自动保存")
+    saved = try_commit_all(root, "wip: 建分支前自动保存")
+    if not saved["ok"]:
+        return saved
     _git(root, "branch", "--", name)
     if switch:
         _git(root, "checkout", name)
@@ -189,7 +198,9 @@ def switch_branch(root: Path, name: str) -> dict:
     existing = {b["name"] for b in list_branches(root)["branches"]}
     if name not in existing:
         raise ValueError(f"分支 {name} 不存在")
-    try_commit_all(root, "wip: 切分支前自动保存")
+    saved = try_commit_all(root, "wip: 切分支前自动保存")
+    if not saved["ok"]:
+        return saved
     _git(root, "checkout", name)
     return {"ok": True, "branch": name, "current": current_branch(root),
             "message": f"已切换到 {name}",
@@ -202,7 +213,9 @@ def merge_branch(root: Path, name: str, message: str = "") -> dict:
     cur = current_branch(root)
     if name == cur:
         raise ValueError("不能把分支合并到它自己")
-    try_commit_all(root, "wip: 合并前自动保存")
+    saved = try_commit_all(root, "wip: 合并前自动保存")
+    if not saved["ok"]:
+        return saved
     p = subprocess.run(
         ["git", "-C", str(root), "merge", "--no-ff", "-m",
          message or f"merge: {name} → {cur}", name],
@@ -239,6 +252,19 @@ def delete_branch(root: Path, name: str, force: bool = False) -> dict:
 
 
 def commit_file_to_branch(root: Path, branch: str, rel_path: str,
+                          content: str, message: str) -> dict:
+    _valid_branch(branch)
+    if not rel_path or rel_path.startswith("/") or ".." in rel_path:
+        raise ValueError("非法文件路径")
+    try:
+        return _commit_file_to_branch(root, branch, rel_path, content, message)
+    except Exception as exc:
+        logger.exception("Cross-branch Git persistence failed for %s", root)
+        return {"ok": False, "status": "failed", "branch": branch,
+                "error": str(exc)[:400], "retryable": True}
+
+
+def _commit_file_to_branch(root: Path, branch: str, rel_path: str,
                           content: str, message: str) -> dict:
     """把一个文件直接提交到指定分支，**完全不碰工作区和当前分支**。
 

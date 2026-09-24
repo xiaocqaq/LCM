@@ -82,12 +82,10 @@ html[data-theme="dark"]{
 }
 *{box-sizing:border-box}
 html,body{margin:0;height:100%}
-/* 字体栈里必须带一个 Linux 上真实存在的 CJK 面：原来只列了 PingFang SC(mac) 和
-   Microsoft YaHei(win)，Linux 直接落到 generic sans-serif —— 那是个纯拉丁面，
-   于是全站中文渲染成豆腐块。Noto Sans CJK SC 是各发行版的标配中文字体。 */
+/* 跨平台字体回退：保留常见系统字体及 Linux CJK 字体候选。 */
 body{background:var(--bg);color:var(--text-body);
      font:14px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei","Noto Sans CJK SC","Noto Sans SC","WenQuanYi Zen Hei","Droid Sans Fallback",sans-serif}
-/* 表单控件不继承 body 字体（UA 样式给的是 arial/13.33px），中文同样会掉成豆腐块 */
+/* 表单控件显式继承字体，让跨平台回退与正文保持一致。 */
 input,select,textarea,button{font-family:inherit}
 
 /* ── 图标 ──
@@ -202,8 +200,7 @@ main::-webkit-scrollbar-track{background:transparent}
 main::-webkit-scrollbar-thumb{background:var(--line-strong);border-radius:99px;
   border:3px solid var(--bg);background-clip:padding-box}
 main::-webkit-scrollbar-thumb:hover{background:var(--faint);background-clip:padding-box}
-/* 内容列限宽。1440 视口下不限宽会让行长到 70 个汉字（舒适区 35-45），
-   而且树的元数据列会被甩到屏幕最右边，造成长距离横向扫视。 */
+
 /* 内容列宽度的三次调整，记下来免得再绕：
    1020 左对齐 → 右侧死白 160px、左侧 28px，5:1 不对称很显眼；
    1120        → 右白降到 60px，但行内标题被拉得过长，元数据被甩到屏幕边缘；
@@ -233,9 +230,7 @@ main > section{max-width:880px;margin-inline:auto}
 .navitem.on .ic{color:var(--accent-bar)}
 /* 项目项：名字可能很长，要能截断而不是把计数挤出去 */
 .navitem .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}
-/* 侧栏项目：跟主区的树是同一份数据，这里只当快捷跳转。
-   计数带上"篇"跟主区口径一致（原来侧栏是裸数字、主区写"8 篇"）。
-   项目多了会把上面的功能入口挤出视口，所以给项目区单独限高滚动。 */
+
 #libs{max-height:34vh;overflow-y:auto;scrollbar-width:thin;scrollbar-color:var(--line-strong) transparent}
 #libs::-webkit-scrollbar{width:6px}
 #libs::-webkit-scrollbar-thumb{background:var(--line-strong);border-radius:99px}
@@ -286,7 +281,7 @@ main > section{max-width:880px;margin-inline:auto}
       background-size:400% 100%;animation:sk 1.3s ease-in-out infinite}
 @keyframes sk{0%{background-position:100% 0}100%{background-position:0 0}}
 @media (prefers-reduced-motion:reduce){.skel{animation:none}}
-/* 文件夹树（项目 → 类型 → 文档） */
+
 /* ===== 文件夹网格视图 =====
    列数不用媒体查询写死：auto-fill + minmax(170px,1fr) 让浏览器自己算，
    主区内容宽 880px 时正好 4~5 列，窄窗口自动降到 3/2 列，不需要断点表。
@@ -297,9 +292,7 @@ main > section{max-width:880px;margin-inline:auto}
        padding:12px 13px;cursor:pointer;transition:border-color .12s,background .12s;
        min-width:0 /* 网格子项默认 min-width:auto，长项目名会把列撑爆 */}
 .pcard:hover{border-color:var(--accent-bar);background:var(--hover)}
-/* 删除按钮（项目级）：默认隐藏，悬停/聚焦卡片时显形。
-   从原树形视图迁移过来，策略不变：常驻的危险按钮会抢占浏览型界面的注意力。
-   visibility 而非 display:none —— 保持占位，卡片右上角不跳动。 */
+
 .pdel{flex:0 0 auto;visibility:hidden;background:transparent;
       border:1px solid transparent;color:var(--danger);
       padding:3px 5px;border-radius:6px;cursor:pointer;line-height:1}
@@ -388,6 +381,61 @@ th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line-soft);
 th{color:var(--faint);font-weight:600;font-size:11.5px;letter-spacing:.05em;text-transform:uppercase}
 tbody tr:hover{background:var(--hover)}
 tbody tr:last-child td{border-bottom:0}
+/* Navigation and list refinement: preserve the existing green palette. */
+#appview{grid-template-columns:232px minmax(0,1fr);min-height:0}
+main,main>section{min-width:0}
+.navitem{width:100%;text-align:left;border:0;background:transparent;white-space:normal}
+.navitem .tcount{font-size:12px;font-weight:400;color:var(--dim)}
+.sidebar-note{font-size:12px;padding:4px 9px}
+#nav-toggle,#nav-shade{display:none}
+.page-heading{margin:0 0 18px}
+.page-heading h1,.page-title{margin:0 0 4px;color:var(--text-title);font-size:22px;line-height:1.4;overflow-wrap:anywhere}
+.page-heading p{margin:0;color:var(--dim);font-size:13px}
+/* 导航后把朗读焦点交给标题，但非交互标题不画浏览器默认黑框。
+   真正可操作的按钮、卡片仍保留清晰的 :focus-visible 轮廓。 */
+#list-title:focus,#page-title:focus{outline:none}
+.page-title{max-width:880px;margin:0 auto 18px}
+#pfilter{display:flex;gap:4px;align-items:center;min-width:0;flex-wrap:wrap;overflow-wrap:anywhere}
+#ltype{width:150px}
+#who{max-width:220px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.toolbar>*{max-width:100%;min-width:0}
+.toolbar .ifield{min-width:0;flex:1 1 220px}
+.toolbar input{min-width:0}
+.load-more{margin:18px auto;display:flex}
+.empty button{margin-top:14px}
+.card h3{overflow-wrap:anywhere}
+.save-status{padding:12px;border:1px solid var(--line);border-radius:8px;margin:12px 0;overflow-wrap:anywhere}
+.save-status.warning{border-color:var(--danger);color:var(--danger)}
+.trash-meta{font-size:12px}
+.doc:focus-visible,button:focus-visible,a:focus-visible{outline:2px solid var(--accent-bar);outline-offset:3px}
+button:disabled{opacity:.5;cursor:not-allowed}
+#v-list .toolbar{gap:8px}
+@media (hover:none){.pdel{visibility:visible;min-width:44px;min-height:44px;justify-content:center}}
+@media (max-width:760px){
+  #appview{grid-template-columns:minmax(0,1fr);grid-template-rows:56px minmax(0,1fr);height:100dvh}
+  header{grid-column:1;padding:0 10px;gap:8px}
+  header button{flex:none;min-width:40px;min-height:40px}
+  #nav-toggle{display:inline-flex}
+  #who{max-width:96px}
+  #sidebar{position:fixed;top:56px;bottom:0;left:0;width:min(290px,85vw);z-index:51;visibility:hidden;transform:translateX(-100%);padding-bottom:max(20px,env(safe-area-inset-bottom))}
+  .nav-open #sidebar{visibility:visible;transform:none}
+  #nav-shade{display:block;position:fixed;inset:56px 0 0;z-index:50;border:0;border-radius:0;background:rgba(0,0,0,.32);padding:0}
+  #libs{max-height:none}
+  .navitem{min-height:44px}
+  main{grid-column:1;grid-row:2;padding:18px 14px 32px}
+  .page-heading h1,.page-title{font-size:20px}
+  #v-list .toolbar .ifield{flex-basis:100%}
+  #ltype{flex:1;width:auto}
+  .toolbar input,.toolbar select,.toolbar button{height:42px}
+  .pgrid{grid-template-columns:repeat(auto-fill,minmax(min(160px,100%),1fr));gap:10px}
+  .pdel{visibility:visible;min-width:40px;min-height:40px;justify-content:center}
+  .searchbar{flex-wrap:wrap}.searchbar .ifield{flex:1 1 100%}.searchbar select{flex:1;min-width:0}.searchbar button{padding-inline:16px}
+  .grid2{grid-template-columns:minmax(0,1fr)}.kv{grid-template-columns:minmax(0,1fr);gap:4px}
+  .card{padding:13px}.card .row{flex-wrap:wrap}
+  .toast{left:14px;right:14px;bottom:14px;overflow-wrap:anywhere}
+  #login .card{width:min(380px,calc(100vw - 28px))}
+  #v-keys>.card,#hist>.card{overflow-x:auto}
+}
 </style>
 </head>
 <body>
@@ -455,14 +503,18 @@ tbody tr:last-child td{border-bottom:0}
     <input id="p" type="password" placeholder="密码" autocomplete="current-password">
     <button class="primary" onclick="doLogin()" style="justify-content:center">登录</button>
     <div class="muted" style="font-size:12px">账号密码走 ai.xlingo.fun 校验，本站只存用户标识，不存密码。</div>
-    <div id="lerr" class="muted" style="color:var(--danger)"></div>
+    <div id="lerr" class="muted" style="color:var(--danger)" role="alert"></div>
+    <button id="boot-retry" class="hidden" onclick="boot()"><svg class="ic sm"><use href="#i-refresh"/></svg>重新连接</button>
   </div>
 </div>
 
 <!-- 主界面 -->
 <div id="appview" class="hidden">
   <header>
-    <div class="brand"><svg class="ic lg"><use href="#i-brain"/></svg><span class="wm">memory<span>s</span></span></div>
+    <div class="row brand-row">
+      <button id="nav-toggle" class="ghost icon" onclick="toggleNav()" aria-label="打开导航" title="导航" aria-controls="sidebar" aria-expanded="false"><svg class="ic"><use href="#i-list"/></svg></button>
+      <div class="brand"><svg class="ic lg"><use href="#i-brain"/></svg><span class="wm">memory<span>s</span></span></div>
+    </div>
     <div class="row" style="gap:6px">
       <span class="muted" id="who" title="当前登录账号" style="font-size:12.5px"></span>
       <button class="ghost icon" id="themebtn" onclick="toggleTheme()" title="切换主题" aria-label="切换深浅主题"><svg class="ic"><use href="#i-moon"/></svg></button>
@@ -471,24 +523,26 @@ tbody tr:last-child td{border-bottom:0}
     </div>
   </header>
 
-  <aside>
+  <button id="nav-shade" class="hidden" onclick="closeNav()" aria-label="关闭导航" tabindex="-1"></button>
+  <aside id="sidebar" aria-label="主导航">
     <div class="sec">记忆</div>
-    <div class="navitem on" data-v="list" onclick="nav('list')"><svg class="ic"><use href="#i-docs"/></svg>全部文档</div>
-    <div class="navitem" data-v="search" onclick="nav('search')"><svg class="ic"><use href="#i-search"/></svg>检索</div>
-    <div class="navitem" data-v="edit" onclick="newDoc()"><svg class="ic"><use href="#i-write"/></svg>新建记忆</div>
-    <div class="navitem" data-v="bootstrap" onclick="nav('bootstrap')"><svg class="ic"><use href="#i-rocket"/></svg>上下文引导包</div>
+    <button class="navitem on" data-v="list" onclick="nav('list')"><svg class="ic"><use href="#i-docs"/></svg>全部文档</button>
+    <button class="navitem" data-v="search" onclick="nav('search')"><svg class="ic"><use href="#i-search"/></svg>检索</button>
+    <button class="navitem" data-v="edit" onclick="newDoc()"><svg class="ic"><use href="#i-write"/></svg>新建记忆</button>
+    <button class="navitem" data-v="bootstrap" onclick="nav('bootstrap')"><svg class="ic"><use href="#i-rocket"/></svg>上下文引导包</button>
     <div class="sec">管理</div>
-    <div class="navitem" data-v="trash" onclick="nav('trash')"><svg class="ic"><use href="#i-trash"/></svg>回收站</div>
-    <div class="navitem" data-v="keys" onclick="nav('keys')"><svg class="ic"><use href="#i-key"/></svg>API Key</div>
-    <div class="navitem" data-v="sync" onclick="nav('sync')"><svg class="ic"><use href="#i-refresh"/></svg>同步 / GitHub</div>
-    <div class="navitem" data-v="branch" onclick="nav('branch')"><svg class="ic"><use href="#i-branch"/></svg>分支</div>
+    <button class="navitem" data-v="trash" onclick="nav('trash')"><svg class="ic"><use href="#i-trash"/></svg>回收站</button>
+    <button class="navitem" data-v="keys" onclick="nav('keys')"><svg class="ic"><use href="#i-key"/></svg>API Key</button>
+    <button class="navitem" data-v="sync" onclick="nav('sync')"><svg class="ic"><use href="#i-refresh"/></svg>同步 / GitHub</button>
+    <button class="navitem" data-v="branch" onclick="nav('branch')"><svg class="ic"><use href="#i-branch"/></svg>分支</button>
     <div class="sec">接入</div>
-    <div class="navitem" data-v="mcp" onclick="nav('mcp')"><svg class="ic"><use href="#i-plug"/></svg>MCP 配置</div>
+    <button class="navitem" data-v="mcp" onclick="nav('mcp')"><svg class="ic"><use href="#i-plug"/></svg>MCP 配置</button>
     <div class="sec">项目</div>
     <div id="libs" class="col" style="gap:2px"></div>
   </aside>
 
-  <main>
+  <main id="main-content">
+    <h1 id="page-title" class="page-title hidden" tabindex="-1"></h1>
     <!-- 检索 -->
     <section id="v-search" class="hidden">
       <div class="searchbar">
@@ -505,12 +559,13 @@ tbody tr:last-child td{border-bottom:0}
 
     <!-- 列表 -->
     <section id="v-list">
+      <div class="page-heading"><h1 id="list-title" tabindex="-1">全部文档</h1><p id="list-subtitle">按项目浏览 · 选择文件夹查看文档</p></div>
       <div class="toolbar">
         <label class="ifield">
           <svg class="ic"><use href="#i-search"/></svg>
-          <input id="lq" aria-label="按标题过滤" placeholder="按标题过滤…" onkeydown="if(event.key==='Enter')loadList()">
+          <input id="lq" aria-label="按标题过滤" placeholder="按标题过滤…" oninput="if(!event.isComposing)scheduleList()" oncompositionend="scheduleList()" onkeydown="if(event.key==='Enter' &amp;&amp; !event.isComposing)loadList()">
         </label>
-        <select id="ltype" style="width:150px" onchange="loadList()" aria-label="按类型筛选">
+        <select id="ltype" onchange="loadList()" aria-label="按类型筛选">
           <option value="">全部类型</option>
           <option value="project_summary">项目总结</option>
           <option value="decision">决策</option>
@@ -519,9 +574,7 @@ tbody tr:last-child td{border-bottom:0}
           <option value="glossary">术语</option>
           <option value="fact">事实</option>
         </select>
-        <!-- 切换按钮删掉了：只剩一种视图 —— 文件夹网格 → 点进去平铺。
-             曾经有"分组（树形）/平铺/文件夹"三种，用户拍板只要文件夹一种，
-             保留切换等于把已经做过的决定再摆出来让用户重新选一遍。 -->
+        <!-- 唯一浏览路径：文件夹网格 → 项目文档平铺。 -->
         <button class="ghost icon" onclick="loadList()" title="刷新" aria-label="刷新"><svg class="ic"><use href="#i-refresh"/></svg></button>
         <button class="primary" onclick="newDoc()"><svg class="ic sm"><use href="#i-plus"/></svg>新建</button>
       </div>
@@ -531,9 +584,11 @@ tbody tr:last-child td{border-bottom:0}
         <span class="row" style="gap:8px">
           <span id="pfilter" class="hidden"></span>
         </span>
-        <span class="muted" id="tstat" style="font-size:12px"></span>
+        <span class="muted" id="tstat" role="status" aria-live="polite" style="font-size:12px"></span>
       </div>
-      <div id="lres"></div>
+      <div id="lres" aria-busy="false"></div>
+      <div id="lpage-error"></div>
+      <button id="lmore" class="hidden load-more" onclick="loadList(undefined,undefined,true)"><svg class="ic sm"><use href="#i-plus"/></svg>加载更多</button>
     </section>
 
     <!-- 编辑 -->
@@ -573,6 +628,7 @@ tbody tr:last-child td{border-bottom:0}
           <textarea id="f-content" rows="18" placeholder="# 小标题&#10;&#10;正文按标题层级自动切 chunk 建索引。"></textarea>
         </div>
       </div>
+      <div id="save-status" class="save-status hidden" role="status" aria-live="polite"></div>
       <div id="hist"></div>
     </section>
 
@@ -607,7 +663,10 @@ tbody tr:last-child td{border-bottom:0}
         <button id="tpurge" class="danger" style="margin-left:auto" disabled
                 onclick="purgeTrash()"><svg class="ic sm"><use href="#i-trash"/></svg><span id="tpurgetxt">清空回收站</span></button>
       </div>
-      <div id="tres"></div>
+      <p id="trash-stat" class="muted" role="status" aria-live="polite"></p>
+      <div id="tres" aria-busy="false"></div>
+      <div id="tpage-error"></div>
+      <button id="tmore" class="hidden load-more" onclick="loadTrash(true)"><svg class="ic sm"><use href="#i-plus"/></svg>加载更多</button>
     </section>
 
     <!-- API Key -->
@@ -791,7 +850,7 @@ tbody tr:last-child td{border-bottom:0}
 
 <script>
 const S = {token:localStorage.getItem('mem_token')||'', user:null, doc:null, boot:'', branch:'',
-           docs:[], lastLib:undefined};
+           docs:[], lastLib:undefined, projFilter:null, view:'list'};
 const $ = s=>document.querySelector(s);
 const H = s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
@@ -852,7 +911,11 @@ async function api(path, opt={}){
   if(r.status===401){ logout(); throw new Error('登录已过期'); }
   const txt = await r.text();
   let data=null; try{ data = txt?JSON.parse(txt):null; }catch(e){ data={detail:txt}; }
-  if(!r.ok) throw new Error((data&&(data.detail||data.error))||('HTTP '+r.status));
+  if(!r.ok){
+    const detail=data&&(data.detail||data.error);
+    const message=typeof detail==='string'?detail:(detail?.message || (detail?JSON.stringify(detail):'HTTP '+r.status));
+    const error=new Error(message);error.status=r.status;throw error;
+  }
   return data;
 }
 
@@ -884,8 +947,12 @@ async function boot(){
     renderMcp();
     const dl = $('#docslink'); if(dl){ dl.href = BASE + '/api/docs'; dl.textContent = BASE + '/api/docs'; }
     // 首屏默认落「全部文档」：进站第一眼要看到库里有什么，而不是一个空搜索框
-    await loadLibs(); nav('list');
-  }catch(e){ logout(); }
+    loadLibs(); await nav('list');
+  }catch(e){
+    // api() alone clears credentials on 401. A temporary failure is not a logout.
+    $('#lerr').textContent=e.message;
+    $('#boot-retry').classList.toggle('hidden',!S.token);
+  }
 }
 
 /* MCP 配置页：把真实 Key 填进去。
@@ -940,43 +1007,79 @@ async function renderMcp(){
 }
 
 /* 导航 */
-function nav(v){
+function syncNav(){
+  document.querySelectorAll('.navitem').forEach(n=>{
+    const active = S.view==='list' && S.projFilter!==null
+      ? n.dataset.proj!==undefined && decodeURIComponent(n.dataset.proj)===S.projFilter
+      : n.dataset.v===S.view;
+    n.classList.toggle('on', active);
+    if(active) n.setAttribute('aria-current','page'); else n.removeAttribute('aria-current');
+  });
+}
+function toggleNav(open){
+  const app=$('#appview');
+  open=open===undefined?!app.classList.contains('nav-open'):open;
+  app.classList.toggle('nav-open',open);
+  $('#nav-toggle').setAttribute('aria-expanded',String(open));
+  $('#nav-shade').classList.toggle('hidden',!open);
+  if(open) $('#sidebar .navitem.on')?.focus(); else $('#nav-toggle').focus();
+}
+function closeNav(){ if($('#appview').classList.contains('nav-open')) toggleNav(false); }
+const VIEW_TITLE={list:'全部文档',search:'检索',edit:'编辑记忆',bootstrap:'上下文引导包',trash:'回收站',keys:'API Key',sync:'同步 / GitHub',branch:'分支',mcp:'MCP 配置'};
+function showView(v){
+  clearTimeout(listTimer); ++loadSeq; S.listLoading=false;
+  S.view=v;closeNav();
+  $('#page-title').textContent=VIEW_TITLE[v]||'';
+  $('#page-title').classList.toggle('hidden',v==='list');
+  $('#main-content').scrollTop=0;
   ['search','list','edit','bootstrap','trash','keys','sync','branch','mcp'].forEach(x=>{
     $('#v-'+x).classList.toggle('hidden', x!==v);
   });
-  document.querySelectorAll('.navitem').forEach(n=>n.classList.toggle('on', n.dataset.v===v));
+  syncNav();
+  (v==='list'?$('#list-title'):$('#page-title')).focus();
+}
+function resetListFilters(){
+  S.projFilter=null; S.lastLib=undefined;
+  $('#lq').value=''; $('#ltype').value='';
+}
+function nav(v){
+  if(v==='list') resetListFilters();
+  showView(v);
   if(v==='search' && !$('#sres').innerHTML.trim()) searchIdle();
-  if(v==='list') loadList();
-  if(v==='trash') loadTrash();
-  if(v==='keys') loadKeys();
-  if(v==='branch') loadBranches();
-  if(v==='sync') loadSchedule();
-  if(v==='mcp') renderMcp();   // Key 可能刚建，重进这页要刷新配置里的值
+  if(v==='list') return loadList();
+  if(v==='trash') return loadTrash();
+  if(v==='keys') return loadKeys();
+  if(v==='branch') return loadBranches();
+  if(v==='sync') return loadSchedule();
+  if(v==='mcp') return renderMcp();
 }
 
 /* 侧栏列项目（不是库）。库实际上基本只有 main，列项目才有导航价值。
    项目名走 data 属性 + 事件委托，不拼进 onclick —— H() 不转义单引号。 */
+let libsSeq=0;
 async function loadLibs(){
+  const seq=++libsSeq;
   try{
-    const d = await api('/api/v1/documents?limit=200');
-    const cnt = {};
-    for(const i of d.items){ const p = i.project || '（未归项目）'; cnt[p] = (cnt[p]||0)+1; }
-    const projs = Object.keys(cnt).sort((a,b)=>{
-      if(a==='（未归项目）') return 1;
-      if(b==='（未归项目）') return -1;
-      return cnt[b]-cnt[a] || a.localeCompare(b);
-    });
-    // 检索页的示例问句要用真实项目名，所以在这里存一份
-    S.projList = projs.filter(p=>p!=='（未归项目）');
-    S.docTotal = d.items.length;
-    $('#libs').innerHTML = projs.length
-      ? projs.map(p=>`<div class="navitem" data-proj="${encodeURIComponent(p)}" title="${H(p)}">`
-          + `<svg class="ic sm"><use href="#i-folder"/></svg>`
-          + `<span class="nm">${H(p)}</span><span class="tcount">${cnt[p]} 篇</span></div>`).join('')
-      : '<div class="muted" style="font-size:12px;padding:4px 9px">还没有记忆</div>';
-    const libs = [...new Set(d.items.map(i=>i.library))];
-    $('#slib').innerHTML = '<option value="">全部库</option>'+libs.map(l=>`<option>${H(l)}</option>`).join('');
-  }catch(e){}
+    const d=await api('/api/v1/projects');
+    if(seq!==libsSeq) return;
+    S.projList=d.projects.map(p=>p.project).filter(Boolean);
+    S.docTotal=d.totalDocuments;
+    $('#libs').innerHTML=d.projects.length ? sortProjects(d.projects).map(p=>
+      `<button class="navitem" data-proj="${encodeURIComponent(p.project)}" title="${H(projectLabel(p.project))}">`
+      + `<svg class="ic sm"><use href="#i-folder"/></svg><span class="nm">${H(projectLabel(p.project))}</span>`
+      + `<span class="tcount">${p.count} 篇</span></button>`).join('')
+      : '<div class="muted sidebar-note">还没有记忆</div>';
+    const selected=$('#slib').value;
+    $('#slib').innerHTML='<option value="">全部库</option>'+d.libraries.map(l=>`<option value="${H(l)}">${H(l)}</option>`).join('');
+    $('#slib').value=d.libraries.includes(selected)?selected:'';
+    syncNav();
+  }catch(e){
+    if(seq===libsSeq) $('#libs').innerHTML='<button class="navitem" onclick="loadLibs()">项目加载失败 · 重试</button>';
+  }
+}
+function projectLabel(project){ return project===''?'未归项目':project; }
+function sortProjects(projects){
+  return [...projects].sort((a,b)=>(a.project===''?1:0)-(b.project===''?1:0)||b.count-a.count||a.project.localeCompare(b.project));
 }
 
 $('#libs').addEventListener('click', e=>{
@@ -985,26 +1088,17 @@ $('#libs').addEventListener('click', e=>{
   filterProj(decodeURIComponent(it.dataset.proj));
 });
 
-// 点侧栏项目 → 列表页只显示该项目。「（未归项目）」是前端造的分组名，
-// 后端不认，所以那种情况下拉全部再让树自己分组。
+// null = 全部，空字符串 = 未归项目；任何真实项目名都不充当占位符。
 function filterProj(p){
-  // 直接 loadList，不再先 nav('list')。
-  // nav('list') 内部会自己调一次无过滤的 loadList，加上这里的一次，
-  // 两个请求并发、旧的全量响应后到会覆盖正确的过滤结果 —— 实测就是
-  // "点 frcws-service 结果显示 fsdp-service"那个 bug 的根源。
-  // 视图切换由 loadList 内部完成，一次请求就够。
-  if($('#v-list').classList.contains('hidden')){
-    ['search','list','edit','bootstrap','trash','keys','sync','branch','mcp']
-      .forEach(x=>$('#v-'+x).classList.toggle('hidden', x!=='list'));
-    document.querySelectorAll('.navitem').forEach(n=>
-      n.classList.toggle('on', n.dataset.v==='list' || n.dataset.proj!==undefined));
-  }
-  $('#lq').value=''; $('#ltype').value='';
-  loadList(undefined, p === '（未归项目）' ? '' : p);
+  resetListFilters(); S.projFilter=p;
+  showView('list');
+  return loadList();
 }
-
-function clearProj(){ loadList(undefined, ''); }
-function filterLib(l){ nav('list'); $('#lq').value=''; loadList(l); }
+function clearProj(){ return nav('list'); }
+function filterLib(l){
+  resetListFilters(); S.lastLib=l; showView('list');
+  return loadList();
+}
 
 /* 检索 */
 /* 首屏空状态：原来这里是纯背景色，72% 的屏幕不给任何信息，
@@ -1068,8 +1162,7 @@ async function doSearch(){
 }
 
 /* 列表 */
-/* 列表有两种模式：文件夹树（项目 → 类型 → 文档）和平铺卡片。
-   记在 localStorage 里，刷新后保持上次的选择。 */
+
 const TYPE_LABEL = {project_summary:'项目总结', decision:'决策', preference:'偏好',
                     howto:'操作步骤', glossary:'术语', fact:'事实'};
 /* 类型图标：sprite id。emoji 换掉了 —— 那一组（📋⚖️❤️🔧📖💡）里
@@ -1079,108 +1172,104 @@ const TYPE_ICON = {project_summary:'i-summary', decision:'i-scale', preference:'
 // 类型的展示顺序：按"回看时的重要程度"排，不用字母序
 const TYPE_ORDER = ['project_summary','decision','preference','howto','glossary','fact'];
 
-/* 视图模式只剩一种：无项目过滤 → 文件夹网格；有过滤 → 该项目的平铺列表。
-   曾经的 setListMode/treeToggleAll/renderTree/syncExpBtn 整套树形逻辑
-   在"只要文件夹视图"的拍板后删掉了。 */
 
-let loadSeq = 0;
-async function loadList(lib, proj){
-  // 请求序号守卫：只让"最后一次发起"的结果落进界面。
-  //
-  // 实测 bug：点侧栏项目时 filterProj() 先 nav('list') 再 loadList(proj)，
-  // 而 nav('list') 内部自己也会调一次 loadList()。两次并发请求 ——
-  // 第一次拉全部（响应大、后到），第二次拉目标项目（响应小、先到），
-  // 结果第一次的旧响应覆盖了第二次的正确渲染：界面显示全量列表、
-  // 第一行是 fsdp-service，而过滤标记却写着刚点的项目。
-  // 用户看到的就是"点 frcws-service 结果跳到了 fsdp-service"。
-  // 在所有入口（nav/filterProj/搜索框/刷新按钮）共享这个守卫才有效，
-  // 只修 filterProj 的调用顺序，下次再加一个入口又会踩一遍。
-  const seq = ++loadSeq;
-  S.lastLib = lib;
-  if(proj !== undefined) S.projFilter = proj;
-  const q=$('#lq').value.trim(), t=$('#ltype').value;
-  let url='/api/v1/documents?limit=200';
-  if(q) url+='&q='+encodeURIComponent(q);
-  if(t) url+='&type='+t;
-  if(lib) url+='&library='+encodeURIComponent(lib);
-  if(S.projFilter) url+='&project='+encodeURIComponent(S.projFilter);
-  // 有项目过滤时给个可点掉的返回标记 —— 现在的导航模型是
-  // "文件夹总览 ⇄ 进入项目"，这个标记就是"返回全部"的出口。
-  // 文案用"‹ 全部项目"而不是项目名加叉：在文件夹语境里,
-  // 用户的心智是"退回上一级"，不是"关掉某个筛选条件"。
-  const pf = $('#pfilter');
-  if(S.projFilter){
-    pf.classList.remove('hidden');
-    pf.innerHTML = `<button class="link" onclick="clearProj()" title="返回全部项目">`
-      + `<svg class="ic sm"><use href="#i-chev" style="transform:rotate(-90deg)"/></svg>`
-      + `全部项目 <span style="opacity:.55">/ ${H(S.projFilter)}</span></button>`;
-  }else{ pf.classList.add('hidden'); pf.innerHTML=''; }
+
+const PAGE_SIZE=50;
+let loadSeq=0, listTimer;
+function scheduleList(){
+  clearTimeout(listTimer);
+  ++loadSeq; // Invalidate immediately, not when the debounce timer eventually fires.
+  S.listHasMore=false;
+  $('#lmore').classList.add('hidden');$('#lpage-error').innerHTML='';
+  $('#lres').innerHTML=loadingMarkup();$('#lres').setAttribute('aria-busy','true');
+  $('#tstat').textContent='等待输入…';
+  listTimer=setTimeout(()=>{if(S.view==='list') loadList();},280);
+}
+function listParams(){
+  const params=new URLSearchParams();
+  const q=$('#lq').value.trim(), type=$('#ltype').value;
+  if(q) params.set('q',q);
+  if(type) params.set('type',type);
+  if(S.lastLib) params.set('library',S.lastLib);
+  return params;
+}
+function projectParams(project){
+  const params=new URLSearchParams();
+  if(project==='') params.set('unassigned','true');
+  else if(project!==null) params.set('project',project);
+  return params;
+}
+function listHeading(){
+  const selected=S.projFilter!==null;
+  $('#list-title').textContent=selected?projectLabel(S.projFilter):'全部文档';
+  $('#pfilter').classList.toggle('hidden',!selected);
+  $('#pfilter').innerHTML=selected?'<button class="link" onclick="clearProj()"><svg class="ic sm"><use href="#i-back"/></svg>全部文档</button><span aria-hidden="true"> / </span><span>'+H(projectLabel(S.projFilter))+'</span>':'';
+  $('#list-subtitle').textContent=selected?'项目文档 · 按最近更新排序':'按项目浏览 · 选择文件夹查看文档';
+}
+function loadingMarkup(){ return '<div role="status" class="muted">正在加载…</div><div class="skel" aria-hidden="true"></div><div class="skel" aria-hidden="true"></div>'; }
+function retryMarkup(message,action){
+  return `<div class="empty" role="alert"><h4>加载失败</h4><p>${H(message)}</p><button onclick="${action}"><svg class="ic sm"><use href="#i-refresh"/></svg>重试</button></div>`;
+}
+function listEmpty(){
+  const filtered=S.projFilter!==null||$('#lq').value.trim()||$('#ltype').value||S.lastLib;
+  return `<div class="empty"><svg class="ic"><use href="#i-docs"/></svg><h4>${filtered?'这个筛选下没有文档':'库里还没有记忆'}</h4>`
+    + `<p>${filtered?'试试其他关键词或清空筛选。':'新建第一条记忆，或通过 MCP 写入。'}</p>`
+    + (filtered?`<button class="link" onclick="nav('list')">清空筛选</button>`:'<button class="primary" onclick="newDoc()">新建记忆</button>')+'</div>';
+}
+async function loadList(lib,proj,more=false){
+  clearTimeout(listTimer);
+  if(more && (S.listLoading || !S.listHasMore)) return;
+  const seq=++loadSeq;
+  if(lib!==undefined) S.lastLib=lib;
+  if(proj!==undefined) S.projFilter=proj;
+  const grid=S.projFilter===null, params=listParams();
+  if(!grid) for(const [k,v] of projectParams(S.projFilter)) params.set(k,v);
+  const offset=more?S.listOffset:0;
+  if(!grid){params.set('limit',PAGE_SIZE);params.set('offset',offset);}
+  listHeading();syncNav();S.listLoading=true;
+  $('#lres').setAttribute('aria-busy','true');$('#lmore').classList.add('hidden');
+  $('#lmore').disabled=true;$('#lpage-error').innerHTML='';
+  if(!more){S.docs=[];S.listHasMore=false;$('#tstat').textContent='加载中…';$('#lres').innerHTML=loadingMarkup();}
   try{
-    const d = await api(url);
-    if(seq !== loadSeq) return;   // 期间又发起了新的加载，这份过期了，扔掉
-    S.docs = d.items;
-    if(!d.items.length){
-      $('#lres').innerHTML = `<div class="empty">
-        <svg class="ic"><use href="#i-docs"/></svg>
-        <h4>${q||t||S.projFilter?'这个筛选下没有文档':'库里还没有记忆'}</h4>
-        <p>${q||t||S.projFilter?'放宽筛选条件，或返回全部项目再看。'
-             :'点右上角「新建」写第一条，或者让挂了 MCP 的 agent 自己往里写。'}</p>
-      </div>`;
-      $('#tstat').textContent = '';
-      return;
+    const d=await api((grid?'/api/v1/projects?':'/api/v1/documents?')+params);
+    if(seq!==loadSeq) return;
+    if(grid){
+      S.listHasMore=false;
+      if(d.projects.length) renderGrid(d.projects);else $('#lres').innerHTML=listEmpty();
+      $('#tstat').textContent=`${d.projects.length} 个项目 · 共 ${d.totalDocuments} 篇`;
+    }else{
+      S.docs=more?S.docs.concat(d.items):d.items;
+      S.listTotal=d.total;S.listOffset=offset+d.items.length;
+      S.listHasMore=d.items.length>0 && S.listOffset<d.total;
+      if(S.docs.length) renderFlat(S.docs);else $('#lres').innerHTML=listEmpty();
+      $('#tstat').textContent=`已显示 ${S.docs.length} / 共 ${d.total} 篇`;
+      if(more) $('#lres').querySelector(`[data-id="${d.items[0]?.id}"]`)?.focus();
     }
-    S.projFilter ? renderFlat(d.items) : renderGrid(d.items);
-  }catch(e){ if(seq === loadSeq) toast(e.message,1); }
+    $('#lmore').classList.toggle('hidden',!S.listHasMore);
+  }catch(e){
+    if(seq!==loadSeq) return;
+    if(more) $('#lpage-error').innerHTML=retryMarkup(e.message,'loadList(undefined,undefined,true)');
+    else{$('#lres').innerHTML=retryMarkup(e.message,'loadList()');$('#tstat').textContent='未能加载';}
+  }finally{
+    if(seq===loadSeq){S.listLoading=false;$('#lmore').disabled=false;$('#lres').setAttribute('aria-busy','false');}
+  }
 }
 
-/* 文件夹网格视图：一行 4~5 个项目卡片，每个卡片是项目概览。
-   场景：项目一多，树形视图一屏只能看到前几个项目名，找项目要滚很久；
-   网格一屏能同时看到所有项目的名字、篇数、最近更新 —— "看项目"比"翻文档"
-   更常见的场景下这版直观点。点卡片进入该项目（应用项目过滤），
-   再点一次项目里的某行才是打开文档。
-   空项目不过滤时也显示"未归项目"卡片，和树形分组口径一致。 */
-function renderGrid(items){
-  const by = {};
-  let latest = {};
-  for(const i of items){
-    const p = i.project || '（未归项目）';
-    (by[p] = by[p] || []).push(i);
-    const u = i.updatedAt || '';
-    if(!latest[p] || u > latest[p][0]) latest[p] = [u, i.title];
-  }
-  const projs = Object.keys(by).sort((a,b)=>{
-    if(a==='（未归项目）') return 1;
-    if(b==='（未归项目）') return -1;
-    return by[b].length - by[a].length || a.localeCompare(b);
-  });
-  const imp5 = p => by[p].some(i=>i.importance>=5);
-  $('#lres').innerHTML = `<div class="pgrid">` + projs.map(p=>{
-    const docs = by[p];
-    const last = latest[p];
-    // 卡片上放"最近更新的一篇"，让用户不用点进去就知道这个项目最近在动什么
-    const sub = last ? H(last[1].length>30? last[1].slice(0,30)+'…' : last[1]) : '';
-    // 删除按钮：树形视图删掉后项目删除的唯一入口挪到了卡片上。
-    // 悬停/聚焦显形（跟原来树行一致的策略）；要 stopPropagation，
-    // 否则点它会同时触发"进项目"。
-    const pid = p==='（未归项目）' ? '__none__' : p;
-    return `<div class="pcard" data-proj="${encodeURIComponent(p)}"
-                 title="${H(p)}｜${docs.length} 篇｜最近：${last?H(last[1]):''}">
-      <div class="pc-top">
-        <svg class="ic"><use href="#i-folder"/></svg>
-        <button class="pdel" data-proj="${encodeURIComponent(pid)}"
-                data-count="${docs.length}" title="删除整个项目「${H(p)}」（${docs.length} 篇移到回收站）"
-                aria-label="删除项目 ${H(p)}"><svg class="ic sm"><use href="#i-trash"/></svg></button>
+/* 聚合返回全量计数；不再靠前 200 篇拼出项目。项目值从不映射为展示占位名。 */
+function renderGrid(projects){
+  $('#lres').innerHTML='<div class="pgrid">'+sortProjects(projects).map(p=>{
+    const name=projectLabel(p.project), enc=encodeURIComponent(p.project);
+    return `<div class="pcard" data-proj="${enc}" tabindex="0" role="group" aria-label="打开项目 ${H(name)}，${p.count} 篇" title="${H(name)}">
+      <div class="pc-top"><svg class="ic"><use href="#i-folder"/></svg>
+        <button class="pdel" data-proj="${enc}" title="删除整个项目（包含筛选外的文档）" aria-label="删除项目 ${H(name)}"><svg class="ic sm"><use href="#i-trash"/></svg></button>
       </div>
-      <div class="pc-name">${H(p==='（未归项目）'?'未归项目':p)}</div>
-      <div class="pc-meta">${docs.length} 篇${last?` · ${H(fmtWhen(last[0]))}`:''}</div>
-      ${sub?`<div class="pc-sub">${sub}</div>`:''}
-    </div>`;
-  }).join('') + '</div>';
-  $('#tstat').textContent = `${projs.length} 个项目 · ${items.length} 篇`;
+      <div class="pc-name">${H(name)}</div><div class="pc-meta">${p.count} 篇${p.updatedAt?' · '+H(fmtWhen(p.updatedAt)):''}</div>
+      <div class="pc-sub" title="${H(p.latestTitle)}">${H(p.latestTitle)}</div></div>`;
+  }).join('')+'</div>';
 }
 
 function renderFlat(items){
-  $('#lres').innerHTML = items.map(i=>`<div class="card doc" data-id="${i.id}">
+  $('#lres').innerHTML = items.map(i=>`<div class="card doc" data-id="${i.id}" tabindex="0" role="button" aria-label="打开 ${H(i.title)}">
     <h3>${H(i.title)}</h3>
     <div class="muted" style="font-size:12px;display:flex;align-items:center;gap:6px;flex-wrap:wrap">
       <span class="badge">${H(TYPE_LABEL[i.type]||i.type)}</span>
@@ -1217,8 +1306,7 @@ function fmtWhen(iso){
 }
 
 
-// 事件委托：树是动态重建的，绑在容器上才不会因重渲染丢监听
-// 键盘可达：树行是 div，需要手工把 Enter/Space 映射成点击
+// 卡片动态重建，委托事件避免重绑。Enter/Space 打开文件夹或文档。
 $('#lres').addEventListener('keydown', e=>{
   if(e.key !== 'Enter' && e.key !== ' ') return;
   // <button> 自己就会触发 click，转发会重复触发（删除按钮点一次弹两次确认）
@@ -1230,13 +1318,11 @@ $('#lres').addEventListener('keydown', e=>{
 });
 
 $('#lres').addEventListener('click', e=>{
-  // 删除按钮必须在这里最先拦截，而且要 stopPropagation。
-  // 它在 .trow 内部，不拦的话点一次会同时触发\"删项目\"和\"折叠该行\"——
-  // 确认框弹出时背后的行已经收起来了，用户看不到自己要删的是哪些内容。
+  // 先拦截删除按钮，避免同时进入项目。
   const pd = e.target.closest('.pdel');
   if(pd){
     e.preventDefault(); e.stopPropagation();
-    delProject(decodeURIComponent(pd.dataset.proj), +pd.dataset.count);
+    delProject(decodeURIComponent(pd.dataset.proj));
     return;
   }
   // 文件夹网格：点卡片 = 进入该项目（应用过滤）。要赶在 [data-id] 之前判，
@@ -1244,7 +1330,7 @@ $('#lres').addEventListener('click', e=>{
   const pc = e.target.closest('.pcard');
   if(pc){
     const p = decodeURIComponent(pc.dataset.proj);
-    filterProj(p === '未归项目' ? '（未归项目）' : p);
+    filterProj(p);
     return;
   }
   const doc = e.target.closest('[data-id]');
@@ -1253,7 +1339,7 @@ $('#lres').addEventListener('click', e=>{
 
 /* 编辑 */
 function newDoc(){
-  S.doc=null; nav('edit');
+  S.doc=null; nav('edit');$('#save-status').classList.add('hidden');$('#save-status').textContent='';
   $('#etitle').textContent='新建记忆';
   $('#ehist').classList.add('hidden'); $('#edel').classList.add('hidden');
   $('#hist').innerHTML='';
@@ -1265,7 +1351,7 @@ function newDoc(){
 async function openDoc(id){
   try{
     const d = await api('/api/v1/documents/'+id);
-    S.doc=d; nav('edit');
+    S.doc=d; nav('edit');$('#save-status').classList.add('hidden');$('#save-status').textContent='';
     $('#etitle').textContent='mem'+d.id;
     $('#ehist').classList.remove('hidden'); $('#edel').classList.remove('hidden');
     $('#hist').innerHTML='';
@@ -1325,6 +1411,22 @@ $('#f-branch').addEventListener('change', e=>{
   updateBranchHint();
 });
 
+function showPersistence(d){
+  const status=d.persistenceStatus || d.persistence_status;
+  const el=$('#save-status');
+  el.classList.remove('hidden');
+  const failed=status?.ok===false || status?.git?.ok===false;
+  el.classList.toggle('warning',failed);el.setAttribute('role',failed?'alert':'status');
+  if(failed){
+    const saved=status.disk==='saved' && status.database==='saved';
+    el.textContent=(saved?'正文已保存到磁盘和数据库，但 Git 版本记录失败。':'保存状态异常，请核对后重试。')
+      +(status.git?.error?' '+status.git.error:'')
+      +(status.retryable?' 可在排除故障后再次保存以重试版本记录。':'');
+  }else if(status?.git?.status==='committed') el.textContent='正文已保存 · Git 版本 '+status.git.commit;
+  else if(status?.git?.status==='unchanged') el.textContent='正文已保存 · Git 无新增改动';
+  else el.textContent='正文已保存 · 服务端未返回 Git 版本状态';
+  return failed;
+}
 async function saveDoc(){
   const p=formPayload();
   if(!p.title||!p.content){ toast('标题和正文都要填',1); return; }
@@ -1333,15 +1435,16 @@ async function saveDoc(){
   const qs = toOther ? ('?branch=' + encodeURIComponent(target)) : '';
   try{
     if(S.doc){
+      if(!toOther) p.expectedRevision=S.doc.revision;
       const d = await api('/api/v1/documents/'+S.doc.id+qs,{method:'PATCH',body:JSON.stringify(p)});
       if(toOther){ await branchSaveResult(d); return; }
-      S.doc=d; toast('已保存 mem'+d.id);
+      S.doc=d;const warning=showPersistence(d);toast(warning?'正文已保存，但版本记录失败，请查看下方提示':'已保存 mem'+d.id,warning);
     }else{
       const d = await api('/api/v1/documents'+qs,{method:'POST',body:JSON.stringify(p)});
       if(toOther){ await branchSaveResult(d); return; }
       S.doc=d; $('#etitle').textContent='mem'+d.id;
       $('#ehist').classList.remove('hidden'); $('#edel').classList.remove('hidden');
-      toast('已创建 mem'+d.id);
+      const warning=showPersistence(d);toast(warning?'正文已保存，但版本记录失败，请查看下方提示':'已创建 mem'+d.id,warning);
     }
     loadLibs();
   }catch(e){
@@ -1352,6 +1455,12 @@ async function saveDoc(){
 
 // 写到别的分支时后端返回的是 git 提交结果，不是文档对象
 async function branchSaveResult(d){
+  if(d.ok===false || !d.commit){
+    const message=d.error||'分支提交未完成，请检查后重试';
+    $('#brhint').textContent='保存失败：'+message;
+    toast('保存失败：'+message,1);
+    return;
+  }
   toast(`已${d.action==='update'?'更新':'写入'}分支 ${d.branch}（${d.commit}）`);
   // 顺序要紧：loadEditBranches 内部会调 updateBranchHint 覆写 #brhint，
   // 所以必须等它跑完再写结果，否则提示会被清空。
@@ -1375,14 +1484,23 @@ async function delDoc(){
    而项目行上并不显示篇数以外的信息。
    注意这里是软删除（进回收站），所以文案要明确\"可恢复\"，
    否则用户会以为不可逆而不敢用，或者以为已经彻底删掉了而不去清回收站。 */
-async function delProject(proj, count){
-  const label = proj === '__none__' ? '未归项目' : proj;
-  if(!confirm(`删除项目「${label}」下的全部 ${count} 篇记忆？\n\n会移到回收站（md 进 .trash，git 留记录），可以在回收站逐篇恢复。`)) return;
+async function delProject(proj){
+  if(S.deletingProject) return;
+  const label=projectLabel(proj);
+  S.deletingProject=true;
   try{
-    const r = await api('/api/v1/projects/'+encodeURIComponent(proj),{method:'DELETE'});
+    // Count the DELETE scope, not the filtered grid or loaded document page.
+    const d=await api('/api/v1/documents?limit=1&offset=0&'+projectParams(proj));
+    const count=d.total;
+    if(!count){toast('这个项目已没有可删除的文档');return;}
+    if(!confirm(`删除项目「${label}」下的全部 ${count} 篇记忆？
+
+包含所有知识库及当前筛选未显示的文档。会移到回收站（md 进 .trash，git 留记录），可逐篇恢复。`)) return;
+    const r=await api('/api/v1/projects?'+projectParams(proj),{method:'DELETE'});
     toast(`已删除「${label}」${r.deleted} 篇`);
-    loadList(); loadLibs();
-  }catch(e){ toast(e.message,1); }
+    await Promise.all([loadList(),loadLibs()]);
+  }catch(e){toast(e.message,1);}
+  finally{S.deletingProject=false;}
 }
 async function showHistory(){
   try{
@@ -1436,29 +1554,36 @@ function copyBootstrap(){
 }
 
 /* 回收站 */
-async function loadTrash(){
+let trashSeq=0;
+async function loadTrash(more=false){
+  if(more && (S.trashLoading || !S.trashHasMore)) return;
+  const seq=++trashSeq,offset=more?S.trashOffset:0;
+  S.trashLoading=true;$('#tpurge').disabled=true;
+  $('#tmore').classList.add('hidden');$('#tmore').disabled=true;
+  $('#tpage-error').innerHTML='';$('#tres').setAttribute('aria-busy','true');
+  if(!more){S.trashDocs=[];S.trashTotal=null;$('#tres').innerHTML=loadingMarkup();$('#trash-stat').textContent='加载中…';$('#tpurgetxt').textContent='清空回收站';}
   try{
-    const d = await api('/api/v1/documents?trash=true&limit=200');
-    $('#tres').innerHTML = d.items.length? d.items.map(i=>`<div class="card">
+    const d=await api(`/api/v1/documents?trash=true&limit=${PAGE_SIZE}&offset=${offset}`);
+    if(seq!==trashSeq) return;
+    S.trashDocs=more?S.trashDocs.concat(d.items):d.items;
+    S.trashTotal=d.total;S.trashOffset=offset+d.items.length;
+    S.trashHasMore=d.items.length>0 && S.trashOffset<d.total;
+    $('#tres').innerHTML=S.trashDocs.length ? S.trashDocs.map(i=>`<div class="card" data-trash-id="${i.id}" tabindex="-1">
       <div class="row"><div style="flex:1;min-width:0">
-        <h3>${H(i.title)}</h3>
-        <div class="muted" style="font-size:12px;display:flex;gap:6px;align-items:center;flex-wrap:wrap">
-          <span class="badge">${H(TYPE_LABEL[i.type]||i.type)}</span>
-          <span>删除于 ${H(fmtWhen(i.updatedAt))}</span>
-        </div>
-      </div><button class="primary" onclick="restore(${i.id})"><svg class="ic sm"><use href="#i-back"/></svg>恢复</button></div></div>`).join('')
-      : `<div class="empty">
-           <svg class="ic"><use href="#i-trash"/></svg>
-           <h4>回收站是空的</h4>
-           <p>删掉的记忆会先放到这里，md 文件移进 .trash 且 git 留有记录，随时能恢复。</p>
-         </div>`;
-    // 按钮文案带上条数：不可逆操作要让人在点之前就知道规模。
-    // 文字写进独立的 span，不用 lastChild —— 按钮里还有个 <svg>，
-    // 靠节点位置取文本的话以后调整按钮内容就会静默改错地方。
-    const b = $('#tpurge'), bt = $('#tpurgetxt');
-    if(b) b.disabled = !d.items.length;
-    if(bt) bt.textContent = d.items.length? `清空回收站（${d.items.length} 篇）` : '清空回收站';
-  }catch(e){ toast(e.message,1); }
+        <h3>${H(i.title)}</h3><div class="muted trash-meta"><span class="badge">${H(TYPE_LABEL[i.type]||i.type)}</span> 删除于 ${H(fmtWhen(i.updatedAt))}</div>
+      </div><button class="primary" onclick="restore(${i.id})" aria-label="恢复 ${H(i.title)}"><svg class="ic sm"><use href="#i-back"/></svg>恢复</button></div></div>`).join('')
+      : '<div class="empty"><svg class="ic"><use href="#i-trash"/></svg><h4>回收站是空的</h4><p>删除的记忆会先放到这里，可以逐篇恢复。</p></div>';
+    $('#trash-stat').textContent=`已显示 ${S.trashDocs.length} / 共 ${d.total} 篇`;
+    $('#tpurgetxt').textContent=d.total?`清空回收站（${d.total} 篇）`:'清空回收站';
+    $('#tpurge').disabled=!d.total;$('#tmore').classList.toggle('hidden',!S.trashHasMore);
+    if(more) $('#tres').querySelector(`[data-trash-id="${d.items[0]?.id}"]`)?.focus();
+  }catch(e){
+    if(seq!==trashSeq) return;
+    if(more) $('#tpage-error').innerHTML=retryMarkup(e.message,'loadTrash(true)');
+    else{$('#tres').innerHTML=retryMarkup(e.message,'loadTrash()');$('#trash-stat').textContent='未能加载';}
+  }finally{
+    if(seq===trashSeq){S.trashLoading=false;$('#tmore').disabled=false;$('#tres').setAttribute('aria-busy','false');}
+  }
 }
 async function restore(id){
   try{ await api('/api/v1/documents/'+id+'/restore',{method:'POST'}); toast('已恢复'); loadTrash(); loadLibs(); }
@@ -1471,17 +1596,24 @@ async function restore(id){
    文案必须诚实说明兜底范围：DB 行和 .trash 里的 md 都真删，
    但 git 历史还在（那是最后一层兜底），所以说"界面上无法恢复"而不是"永久消失"。 */
 async function purgeTrash(){
-  const n = ($('#tres').querySelectorAll('.card') || []).length;
-  if(!n){ toast('回收站是空的',1); return; }
-  if(!confirm(`彻底删除回收站里的 ${n} 篇记忆？\n\n数据库记录和 .trash 里的 md 文件都会真删，界面上无法再恢复。\n（git 历史仍保留，必要时可以从提交记录里找回内容）`)) return;
-  const t = prompt(`确认无误请输入「清空」两个字：`);
-  if(t === null) return;
-  if(t.trim() !== '清空'){ toast('输入不匹配，已取消',1); return; }
+  if(S.purging || S.trashLoading) return;
+  S.purging=true;$('#tpurge').disabled=true;
   try{
-    const r = await api('/api/v1/trash/empty',{method:'POST'});
+    const d=await api('/api/v1/documents?trash=true&limit=1&offset=0');
+    const n=d.total;
+    if(!n){toast('回收站是空的');await loadTrash();return;}
+    if(!confirm(`彻底删除回收站里的 ${n} 篇记忆？
+
+数据库记录和 .trash 里的 md 文件都会真删，界面上无法再恢复。
+（git 历史仍保留，必要时可以从提交记录里找回内容）`)) return;
+    const t=prompt('确认无误请输入「清空」两个字：');
+    if(t===null) return;
+    if(t.trim()!=='清空'){toast('输入不匹配，已取消',1);return;}
+    const r=await api('/api/v1/trash/empty?expected_count='+n,{method:'POST'});
     toast(`已清空：${r.purged} 篇记录 / ${r.files} 个文件`);
-    loadTrash(); loadLibs();
-  }catch(e){ toast(e.message,1); }
+    await Promise.all([loadTrash(),loadLibs()]);
+  }catch(e){toast(e.message,1);await loadTrash();}
+  finally{S.purging=false;$('#tpurge').disabled=!S.trashTotal || S.trashLoading;}
 }
 
 /* API Key */
@@ -1703,6 +1835,16 @@ async function branchDelete(name){
   }catch(e){ brOut(e.message); toast(e.message,1); }
 }
 
+document.addEventListener('keydown',e=>{
+  if(!$('#appview').classList.contains('nav-open')) return;
+  if(e.key==='Escape'){e.preventDefault();closeNav();return;}
+  if(e.key==='Tab'){
+    const targets=[...$('#sidebar').querySelectorAll('button:not(:disabled)')];
+    const first=targets[0],last=targets[targets.length-1];
+    if(e.shiftKey && document.activeElement===first){e.preventDefault();last?.focus();}
+    else if(!e.shiftKey && document.activeElement===last){e.preventDefault();first?.focus();}
+  }
+});
 if(S.token) boot();
 </script>
 </body>

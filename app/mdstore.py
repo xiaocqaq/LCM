@@ -1,5 +1,7 @@
 """Markdown + YAML frontmatter 读写。md 文件是 source of truth，DB 只是索引。"""
 import hashlib
+import os
+import tempfile
 import re
 import unicodedata
 from datetime import datetime, timezone
@@ -37,7 +39,22 @@ def build_frontmatter(meta: dict) -> str:
     for k in FM_KEYS:
         if k in meta and meta[k] not in (None, "", []):
             ordered[k] = meta[k]
+    ordered.update({k: v for k, v in meta.items() if k not in FM_KEYS})
     return "---\n" + yaml.safe_dump(ordered, allow_unicode=True, sort_keys=False, default_flow_style=False) + "---\n"
+
+
+def atomic_write(path: Path, content: str | bytes) -> None:
+    """Replace a complete file on the same filesystem; never expose partial YAML."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".memorys-", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(content.encode("utf-8") if isinstance(content, str) else content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(tmp, path)
+    finally:
+        Path(tmp).unlink(missing_ok=True)
 
 
 def parse_document(raw: str) -> tuple[dict, str]:

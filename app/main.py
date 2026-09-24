@@ -1,24 +1,43 @@
 """FastAPI 主应用：REST API + MCP（streamable HTTP）+ Web UI。"""
+import asyncio
+import logging
+import os
+import stat
 import subprocess
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Annotated
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, Query
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import select, text
+from sqlalchemy import select, text, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from . import service
 from . import links as links_mod
-from .mcp_server import mcp
+from .mcp_server import mcp, public_persistence_status
 from .config import settings
 from .db import SessionLocal, get_session, engine
 from .mdstore import user_root
+from .mutations import finish_mutation, run_blocking, user_lock
 from .models import ApiKey, Base, Document, User
 from .security import AuthContext, authenticate_headers, hash_key, issue_local_jwt, new_api_key
 
 STATIC_DIR = Path(__file__).parent / "static"
+logger = logging.getLogger(__name__)
+READY_TIMEOUT_SECONDS = 2.0
+
+
+async def _startup_statement(conn, statement):
+    """An optional migration failure must not poison the outer PG transaction."""
+    try:
+        async with conn.begin_nested():
+            return await conn.execute(text(statement))
+    except Exception:
+        logger.warning("Optional startup statement failed: %s", statement, exc_info=True)
+        return None
 
 
 @asynccontextmanager
@@ -55,49 +74,32 @@ async def lifespan(app: FastAPI):
             "CREATE INDEX IF NOT EXISTS idx_documents_not_superseded "
             "ON documents(user_id) WHERE deleted_at IS NULL AND superseded_by IS NULL",
         ]:
-            try:
-                await conn.execute(text(stmt))
-            except Exception:
-                pass
+            await _startup_statement(conn, stmt)
 
-        # embedding 列的 TOAST 策略：向量是大值，EXTERNAL 关掉压缩省 CPU。
-        # 先查再改 —— 无条件 ALTER 每次启动都要抢 ACCESS EXCLUSIVE 锁，
-        # 而这个设置只需要生效一次。
-        try:
-            cur = (await conn.execute(text(
-                "SELECT attstorage FROM pg_attribute "
-                "WHERE attrelid = 'chunks'::regclass AND attname = 'embedding'"
-            ))).scalar()
-            # asyncpg 把 pg_attribute.attstorage（内部类型 "char"）返回成 bytes，
-            # 直接和字符串 "e" 比会永远不等 → 每次启动都白抢一次表锁。
-            if isinstance(cur, (bytes, bytearray)):
-                cur = cur.decode()
-            if cur and cur != "e":   # 'e' = EXTERNAL
-                await conn.execute(text(
-                    "ALTER TABLE chunks ALTER COLUMN embedding SET STORAGE EXTERNAL"))
-        except Exception:
-            pass
+        # Probe storage before ALTER to avoid unnecessary exclusive table locks.
+        result = await _startup_statement(conn,
+            "SELECT attstorage FROM pg_attribute "
+            "WHERE attrelid = 'chunks'::regclass AND attname = 'embedding'")
+        cur = result.scalar() if result is not None else None
+        if isinstance(cur, (bytes, bytearray)):
+            cur = cur.decode()
+        if cur and cur != "e":
+            await _startup_statement(conn, "ALTER TABLE chunks ALTER COLUMN embedding SET STORAGE EXTERNAL")
 
-        # hnsw 索引维度必须跟 settings.embed_dim 一致，且写死在索引定义里。
-        # 换模型换维度时旧索引会静默失效（表达式不匹配，PG 直接不用它，退化成全表扫描
-        # 且不报错），所以这里按维度命名索引，并把不同维度的旧索引删掉。
         dim = settings.embed_dim
-        try:
-            await conn.execute(text("SELECT 1 FROM chunks LIMIT 1"))
-            rows = await conn.execute(text(
-                "SELECT indexname FROM pg_indexes "
-                "WHERE tablename='chunks' AND indexname LIKE 'idx_chunks_embedding%'"
-            ))
-            keep = f"idx_chunks_embedding_{dim}"
+        rows = await _startup_statement(conn,
+            "SELECT indexname FROM pg_indexes "
+            "WHERE tablename='chunks' AND indexname LIKE 'idx_chunks_embedding%'")
+        keep = f"idx_chunks_embedding_{dim}"
+        # Each DROP/CREATE gets its own savepoint, including extension failures.
+        if rows is not None:
             for (name,) in rows.fetchall():
                 if name != keep:
-                    await conn.execute(text(f'DROP INDEX IF EXISTS "{name}"'))
-            await conn.execute(text(
-                f"CREATE INDEX IF NOT EXISTS {keep} ON chunks "
-                f"USING hnsw((embedding::vector({dim})) vector_cosine_ops)"
-            ))
-        except Exception:
-            pass
+                    quoted = name.replace('"', '""')
+                    await _startup_statement(conn, f'DROP INDEX IF EXISTS "{quoted}"')
+        await _startup_statement(conn,
+            f"CREATE INDEX IF NOT EXISTS {keep} ON chunks "
+            f"USING hnsw((embedding::vector({dim})) vector_cosine_ops)")
     # MCP streamable HTTP 需要在应用生命周期内跑起 task group
     from .mcp_app import session_manager
     async with session_manager.run():
@@ -206,6 +208,8 @@ async def revoke_key(key_id: int, ctx: AuthContext = Depends(auth), session: Asy
 
 # ---------- 文档 CRUD ----------
 def _doc_json(d: Document, with_content: bool = True) -> dict:
+    from .revisions import document_revision
+
     out = {"id": d.id, "title": d.title, "type": d.md_type, "library": d.library, "project": d.project,
            "tags": d.tags, "importance": d.importance, "source": d.source,
            "links": d.links or [],
@@ -215,7 +219,9 @@ def _doc_json(d: Document, with_content: bool = True) -> dict:
            "lastAccessedAt": d.last_accessed_at.isoformat() if d.last_accessed_at else None,
            "createdAt": d.created_at.isoformat() if d.created_at else None,
            "updatedAt": d.updated_at.isoformat() if d.updated_at else None,
-           "contentHash": d.content_hash}
+           "contentHash": d.content_hash,
+           "revision": document_revision(d),
+           "persistenceStatus": public_persistence_status(d)}
     if with_content:
         out["content"] = d.content
     # links 里有解析不出来的目标时必须让调用方看见：
@@ -236,7 +242,8 @@ async def _get_doc(ctx: AuthContext, session: AsyncSession, doc_id: int, include
 @app.get("/api/v1/documents")
 async def list_documents(ctx: AuthContext = Depends(auth), session: AsyncSession = Depends(get_session),
                          library: str | None = None, project: str | None = None, type: str | None = None,
-                         q: str | None = None, limit: int = 50, offset: int = 0, trash: bool = False):
+                         q: str | None = None, limit: Annotated[int, Query(ge=1, le=200)] = 50,
+                         offset: Annotated[int, Query(ge=0)] = 0, trash: bool = False, unassigned: bool = False):
     conds = [Document.user_id == ctx.user.id]
     if trash:
         conds.append(Document.deleted_at.is_not(None))
@@ -244,33 +251,67 @@ async def list_documents(ctx: AuthContext = Depends(auth), session: AsyncSession
         conds.append(Document.deleted_at.is_(None))
     if library:
         conds.append(Document.library == library)
-    if project:
+    if unassigned:
+        conds.append(or_(Document.project == "", Document.project.is_(None)))
+    elif project:
         conds.append(Document.project == project)
     if type:
         conds.append(Document.md_type == type)
     if q:
         conds.append(Document.title.ilike(f"%{q}%"))
     rows = (await session.execute(
-        select(Document).where(*conds).order_by(Document.updated_at.desc()).limit(min(limit, 200)).offset(offset)
+        select(Document).where(*conds).order_by(Document.updated_at.desc(), Document.id.desc()).limit(limit).offset(offset)
     )).scalars().all()
-    total = len(rows)
+    total = (await session.execute(select(func.count()).select_from(Document).where(*conds))).scalar_one()
     return {"total": total, "items": [_doc_json(d, with_content=False) for d in rows]}
+
+
+@app.get("/api/v1/projects")
+async def projects(q: str | None = None, type: str | None = None, library: str | None = None,
+                   ctx: AuthContext = Depends(auth), session: AsyncSession = Depends(get_session)):
+    """Aggregate all matching documents in SQL; never load their bodies."""
+    conds = [Document.user_id == ctx.user.id, Document.deleted_at.is_(None)]
+    if q:
+        conds.append(Document.title.ilike(f"%{q}%"))
+    if type:
+        conds.append(Document.md_type == type)
+    if library:
+        conds.append(Document.library == library)
+    project = func.coalesce(Document.project, "")
+    ranked = select(
+        project.label("project"), Document.title, Document.updated_at,
+        func.count().over(partition_by=project).label("count"),
+        func.row_number().over(partition_by=project,
+                               order_by=(Document.updated_at.desc(), Document.id.desc())).label("position"),
+    ).where(*conds).subquery()
+    rows = (await session.execute(
+        select(ranked.c.project, ranked.c.count, ranked.c.title, ranked.c.updated_at)
+        .where(ranked.c.position == 1).order_by(ranked.c.count.desc(), ranked.c.project)
+    )).all()
+    libraries = (await session.execute(
+        select(Document.library).where(*conds).distinct().order_by(Document.library)
+    )).scalars().all()
+    return {"totalDocuments": sum(row.count for row in rows),
+            "projects": [{"project": row.project, "count": row.count, "latestTitle": row.title,
+                          "updatedAt": row.updated_at.isoformat() if row.updated_at else None} for row in rows],
+            "libraries": libraries}
 
 
 @app.post("/api/v1/documents")
 async def create_document(payload: dict, branch: str = "", ctx: AuthContext = Depends(auth), session: AsyncSession = Depends(get_session)):
     # branch 为空或等于当前分支 → 走正常路径（落盘 + 进 DB + 建索引）
     # 指定了别的分支 → 只往 git 对象库提交，不动工作区也不进 DB
-    if branch:
+    async with user_lock(ctx.user.id):
+        if branch:
+            try:
+                return await service.write_to_branch(session, ctx.user, payload, branch)
+            except ValueError as e:
+                raise HTTPException(400, detail=str(e))
         try:
-            return await service.write_to_branch(session, ctx.user, payload, branch)
-        except ValueError as e:
-            raise HTTPException(400, detail=str(e))
-    try:
-        doc = await service.create_document(session, ctx.user, payload)
-    except service.DuplicateError as e:
-        return JSONResponse(status_code=409, content={"detail": "已存在同标题文档", "documentId": e.doc.id, "title": e.doc.title})
-    return _doc_json(doc)
+            doc = await service.create_document(session, ctx.user, payload)
+        except service.DuplicateError as e:
+            return JSONResponse(status_code=409, content={"detail": "已存在同标题文档", "documentId": e.doc.id, "title": e.doc.title})
+        return _doc_json(doc)
 
 
 @app.get("/api/v1/documents/{doc_id}")
@@ -312,38 +353,43 @@ async def related_documents(doc_id: int, ctx: AuthContext = Depends(auth),
 
 @app.patch("/api/v1/documents/{doc_id}")
 async def patch_document(doc_id: int, payload: dict, branch: str = "", ctx: AuthContext = Depends(auth), session: AsyncSession = Depends(get_session)):
-    d = await _get_doc(ctx, session, doc_id)
-    # 指定别的分支 = "另存到该分支"：原文档在当前分支保持不动
-    if branch:
+    from .revisions import document_revision
+
+    async with user_lock(ctx.user.id):
+        d = await _get_doc(ctx, session, doc_id)
+        # 指定别的分支 = "另存到该分支"：原文档在当前分支保持不动
+        if branch:
+            try:
+                return await service.write_to_branch(session, ctx.user, payload, branch, doc=d)
+            except ValueError as e:
+                raise HTTPException(400, detail=str(e))
         try:
-            return await service.write_to_branch(session, ctx.user, payload, branch, doc=d)
-        except ValueError as e:
-            raise HTTPException(400, detail=str(e))
-    try:
-        d = await service.update_document(session, ctx.user, d, payload, expected_hash=payload.get("expectedHash"))
-    except service.ConflictError as e:
-        return JSONResponse(status_code=409, content={"detail": str(e), "contentHash": d.content_hash})
-    return _doc_json(d)
+            d = await service.update_document(session, ctx.user, d, payload, expected_hash=payload.get("expectedHash"), expected_revision=payload.get("expectedRevision"))
+        except service.ConflictError as e:
+            return JSONResponse(status_code=409, content={"detail": str(e), "contentHash": d.content_hash, "revision": document_revision(d)})
+        return _doc_json(d)
 
 
 @app.delete("/api/v1/documents/{doc_id}")
 async def delete_document(doc_id: int, ctx: AuthContext = Depends(auth), session: AsyncSession = Depends(get_session)):
-    d = await _get_doc(ctx, session, doc_id)
-    d = await service.soft_delete_document(session, ctx.user, d)
-    return {"ok": True, "deletedAt": d.deleted_at.isoformat()}
+    async with user_lock(ctx.user.id):
+        d = await _get_doc(ctx, session, doc_id)
+        d = await service.soft_delete_document(session, ctx.user, d)
+        return {"ok": True, "deletedAt": d.deleted_at.isoformat()}
 
 
 @app.post("/api/v1/documents/{doc_id}/restore")
 async def restore_document(doc_id: int, ctx: AuthContext = Depends(auth), session: AsyncSession = Depends(get_session)):
-    d = await _get_doc(ctx, session, doc_id, include_deleted=True)
-    if not d.deleted_at:
-        return {"ok": True, "restored": False}
-    d = await service.restore_document(session, ctx.user, d)
-    return {"ok": True, "restored": True}
+    async with user_lock(ctx.user.id):
+        d = await _get_doc(ctx, session, doc_id, include_deleted=True)
+        if not d.deleted_at:
+            return {"ok": True, "restored": False}
+        d = await service.restore_document(session, ctx.user, d)
+        return {"ok": True, "restored": True}
 
 
 @app.delete("/api/v1/projects/{project:path}")
-async def delete_project(project: str, library: str | None = None,
+async def delete_project(project: str, library: str | None = None, unassigned: bool | None = None,
                          ctx: AuthContext = Depends(auth),
                          session: AsyncSession = Depends(get_session)):
     """删掉一个项目下的所有文档（软删除，进回收站）。
@@ -355,24 +401,43 @@ async def delete_project(project: str, library: str | None = None,
     "未归项目"（project 为空串）用 __none__ 这个哨兵表示 —— 空串没法放进
     URL 路径段，`DELETE /api/v1/projects/` 会被当成另一个路由。
     """
-    proj = "" if project == "__none__" else project
-    res = await service.soft_delete_project(session, ctx.user, proj, library)
-    if not res["deleted"]:
-        raise HTTPException(404, f"项目「{proj or '未归项目'}」下没有可删除的文档")
-    return {"ok": True, **res}
+    async with user_lock(ctx.user.id):
+        # Only the legacy path without an explicit flag reserves __none__.
+        proj = "" if unassigned is True or (unassigned is None and project == "__none__") else project
+        res = await service.soft_delete_project(session, ctx.user, proj, library)
+        if not res["deleted"]:
+            raise HTTPException(404, f"项目「{proj or '未归项目'}」下没有可删除的文档")
+        return {"ok": True, **res}
+
+
+@app.delete("/api/v1/projects")
+async def delete_projects_query(project: str = "", unassigned: bool = False, library: str | None = None,
+                                ctx: AuthContext = Depends(auth), session: AsyncSession = Depends(get_session)):
+    """Collision-free query API: project names are literal, including __none__."""
+    if not unassigned and not project:
+        raise HTTPException(400, "需要 project 或 unassigned=true")
+    return await delete_project(project=project, library=library, unassigned=unassigned, ctx=ctx, session=session)
 
 
 @app.post("/api/v1/trash/empty")
 async def empty_trash(ctx: AuthContext = Depends(auth),
-                      session: AsyncSession = Depends(get_session)):
+                      session: AsyncSession = Depends(get_session),
+                      expected_count: Annotated[int | None, Query(ge=0)] = None):
     """清空回收站：DB 行和 .trash/ 下的 md 都真删，不可在界面上恢复。
 
     用 POST 而不是 DELETE /api/v1/trash：这不是"删除某个资源"，
     是一个有副作用的批量动作，而且 DELETE 在有些代理/客户端上会被
     当成幂等可重试的请求。
     """
-    res = await service.empty_trash(session, ctx.user)
-    return {"ok": True, **res}
+    async with user_lock(ctx.user.id):
+        if expected_count is not None:
+            actual = (await session.execute(select(func.count()).select_from(Document).where(
+                Document.user_id == ctx.user.id, Document.deleted_at.is_not(None)
+            ))).scalar_one()
+            if actual != expected_count:
+                raise HTTPException(409, {"message": "回收站数量已变化，请刷新后重新确认", "actualCount": actual})
+        res = await service.empty_trash(session, ctx.user)
+        return {"ok": True, **res}
 
 
 @app.get("/api/v1/documents/{doc_id}/history")
@@ -380,7 +445,7 @@ async def doc_history(doc_id: int, ctx: AuthContext = Depends(auth), session: As
     d = await _get_doc(ctx, session, doc_id, include_deleted=True)
     from . import gitsvc
     root = user_root(settings.data_dir, ctx.user.id)
-    return gitsvc.history(root, d.rel_path)
+    return await run_blocking(gitsvc.history, root, d.rel_path)
 
 
 # ---------- 检索 ----------
@@ -426,24 +491,27 @@ async def bootstrap(project: str | None = None, token_budget: int = 4000,
 
 # ---------- 磁盘同步 / GitHub ----------
 @app.post("/api/v1/sync")
+@finish_mutation
 async def sync(payload: dict | None = None, ctx: AuthContext = Depends(auth), session: AsyncSession = Depends(get_session)):
     """磁盘→DB 重建索引；payload.pull=true 时先 git pull。"""
-    action = (payload or {}).get("action") or "reindex"
-    root = user_root(settings.data_dir, ctx.user.id)
-    pulled = None
-    if action == "pull":
-        # 走 gitsvc：远端和分支都是按用户算的，裸 git pull 不知道该拉哪个分支
-        from . import gitsvc
-        pulled = gitsvc.pull_from_github(root, ctx.user.id)
-    stats = await service.sync_from_disk(session, ctx.user)
-    return {"pulled": pulled, **stats}
+    async with user_lock(ctx.user.id):
+        action = (payload or {}).get("action") or "reindex"
+        root = user_root(settings.data_dir, ctx.user.id)
+        pulled = None
+        if action == "pull":
+            # 走 gitsvc：远端和分支都是按用户算的，裸 git pull 不知道该拉哪个分支
+            from . import gitsvc
+            pulled = await run_blocking(gitsvc.pull_from_github, root, ctx.user.id)
+        stats = await service.sync_from_disk(session, ctx.user)
+        return {"pulled": pulled, **stats}
 
 
 @app.post("/api/v1/sync/push")
 async def sync_push(ctx: AuthContext = Depends(auth)):
-    from . import gitsvc
-    root = user_root(settings.data_dir, ctx.user.id)
-    return gitsvc.sync_to_github(root, ctx.user.id)
+    async with user_lock(ctx.user.id):
+        from . import gitsvc
+        root = user_root(settings.data_dir, ctx.user.id)
+        return await run_blocking(gitsvc.sync_to_github, root, ctx.user.id)
 
 
 @app.get("/api/v1/sync/schedule")
@@ -455,7 +523,7 @@ async def sync_schedule(ctx: AuthContext = Depends(auth)):
     """
     unit = "memorys-push.timer"
     try:
-        p = subprocess.run(
+        p = await run_blocking(subprocess.run,
             ["systemctl", "show", unit, "--no-pager",
              "--property=LoadState,ActiveState,NextElapseUSecRealtime,LastTriggerUSec"],
             capture_output=True, text=True, timeout=10)
@@ -467,7 +535,7 @@ async def sync_schedule(ctx: AuthContext = Depends(auth)):
                             "/etc/systemd/system/ && systemctl daemon-reload && "
                             "systemctl enable --now memorys-push.timer"}
         # 上次运行结果单独查 service（timer 只记触发时间，不记成败）
-        s = subprocess.run(
+        s = await run_blocking(subprocess.run,
             ["systemctl", "show", "memorys-push.service", "--no-pager",
              "--property=ExecMainStatus,ExecMainExitTimestamp,Result"],
             capture_output=True, text=True, timeout=10)
@@ -496,51 +564,94 @@ def _repo(ctx: AuthContext):
 
 @app.get("/api/v1/branches")
 async def branches(ctx: AuthContext = Depends(auth)):
-    gitsvc, root = _repo(ctx)
-    return gitsvc.list_branches(root)
+    async with user_lock(ctx.user.id):
+        gitsvc, root = await run_blocking(_repo, ctx)
+        return await run_blocking(gitsvc.list_branches, root)
 
 
 @app.post("/api/v1/branches")
-async def branch_create(payload: dict, ctx: AuthContext = Depends(auth)):
-    gitsvc, root = _repo(ctx)
-    try:
-        return gitsvc.create_branch(root, payload.get("name", ""),
-                                    switch=bool(payload.get("switch", True)))
-    except ValueError as e:
-        raise HTTPException(400, detail=str(e))
+@finish_mutation
+async def branch_create(payload: dict, ctx: AuthContext = Depends(auth), session: AsyncSession = Depends(get_session)):
+    async with user_lock(ctx.user.id):
+        gitsvc, root = await run_blocking(_repo, ctx)
+        try:
+            switch = bool(payload.get("switch", True))
+            result = await run_blocking(gitsvc.create_branch, root, payload.get("name", ""), switch=switch)
+            if result.get("ok") and switch:
+                result["sync"] = await service.sync_from_disk(session, ctx.user)
+            return result
+        except ValueError as e:
+            raise HTTPException(400, detail=str(e))
 
 
 @app.post("/api/v1/branches/switch")
-async def branch_switch(payload: dict, ctx: AuthContext = Depends(auth)):
-    gitsvc, root = _repo(ctx)
-    try:
-        return gitsvc.switch_branch(root, payload.get("name", ""))
-    except ValueError as e:
-        raise HTTPException(400, detail=str(e))
+@finish_mutation
+async def branch_switch(payload: dict, ctx: AuthContext = Depends(auth), session: AsyncSession = Depends(get_session)):
+    async with user_lock(ctx.user.id):
+        gitsvc, root = await run_blocking(_repo, ctx)
+        try:
+            result = await run_blocking(gitsvc.switch_branch, root, payload.get("name", ""))
+            if result.get("ok"):
+                result["sync"] = await service.sync_from_disk(session, ctx.user)
+            return result
+        except ValueError as e:
+            raise HTTPException(400, detail=str(e))
 
 
 @app.post("/api/v1/branches/merge")
-async def branch_merge(payload: dict, ctx: AuthContext = Depends(auth)):
-    gitsvc, root = _repo(ctx)
-    try:
-        return gitsvc.merge_branch(root, payload.get("name", ""),
-                                   payload.get("message", ""))
-    except ValueError as e:
-        raise HTTPException(400, detail=str(e))
+@finish_mutation
+async def branch_merge(payload: dict, ctx: AuthContext = Depends(auth), session: AsyncSession = Depends(get_session)):
+    async with user_lock(ctx.user.id):
+        gitsvc, root = await run_blocking(_repo, ctx)
+        try:
+            result = await run_blocking(gitsvc.merge_branch, root, payload.get("name", ""), payload.get("message", ""))
+            if result.get("ok"):
+                result["sync"] = await service.sync_from_disk(session, ctx.user)
+            return result
+        except ValueError as e:
+            raise HTTPException(400, detail=str(e))
 
 
 @app.delete("/api/v1/branches/{name:path}")
 async def branch_delete(name: str, force: bool = False, ctx: AuthContext = Depends(auth)):
-    gitsvc, root = _repo(ctx)
-    try:
-        return gitsvc.delete_branch(root, name, force=force)
-    except ValueError as e:
-        raise HTTPException(400, detail=str(e))
+    async with user_lock(ctx.user.id):
+        gitsvc, root = await run_blocking(_repo, ctx)
+        try:
+            return await run_blocking(gitsvc.delete_branch, root, name, force=force)
+        except ValueError as e:
+            raise HTTPException(400, detail=str(e))
 
 
 # ---------- 健康检查 ----------
 @app.get("/api/health")
 async def health():
+    return {"ok": True, "service": "memorys"}
+
+
+def _check_data_directory():
+    # No mkdir/write probe: readiness must not change the source-of-truth tree.
+    directory = Path(settings.data_dir)
+    mode = directory.stat().st_mode
+    if (not stat.S_ISDIR(mode) or not mode & 0o444 or not mode & 0o222 or not mode & 0o111
+            or not os.access(directory, os.R_OK | os.W_OK | os.X_OK)):
+        raise PermissionError("data directory unavailable")
+
+
+async def _readiness_checks():
+    async with SessionLocal() as session:
+        await session.execute(text("SELECT 1"))
+    await run_blocking(_check_data_directory)
+
+
+@app.get("/api/ready")
+async def ready():
+    request_id = uuid.uuid4().hex
+    try:
+        await asyncio.wait_for(_readiness_checks(), timeout=READY_TIMEOUT_SECONDS)
+    except Exception:
+        logger.exception("Readiness check failed request_id=%s", request_id)
+        return JSONResponse(status_code=503, content={"ok": False, "detail": "服务暂不可用", "requestId": request_id},
+                            headers={"X-Request-ID": request_id})
     return {"ok": True, "service": "memorys"}
 
 
