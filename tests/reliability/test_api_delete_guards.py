@@ -20,9 +20,11 @@ async def test_empty_trash_count_guard_inside_lock(monkeypatch, actual, expected
         finally:
             held = False
     async def execute(query):
+        raise AssertionError('snapshot helper is overridden in this count-only contract test')
+    async def snapshot(session, user_id):
         assert held
-        assert 'count(' in str(query).lower()
-        return SimpleNamespace(scalar_one=lambda: actual)
+        return {'total': actual, 'revision': 'trash-fixture'}
+    monkeypatch.setattr(main, '_trash_snapshot', snapshot)
     async def purge(*args):
         assert held
         return {'purged': actual}
@@ -33,7 +35,7 @@ async def test_empty_trash_count_guard_inside_lock(monkeypatch, actual, expected
     main.app.dependency_overrides[main.get_session] = lambda: SimpleNamespace(execute=execute)
     try:
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url='http://testserver') as client:
-            result = await client.post(f'/api/v1/trash/empty?expected_count={expected}')
+            result = await client.post(f'/api/v1/trash/empty?expected_count={expected}&expected_revision=trash-fixture')
         assert result.status_code == status
         assert purge_mock.await_count == (1 if status == 200 else 0)
     finally:

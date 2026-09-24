@@ -127,7 +127,7 @@ test('real markup wires loading/pagination, keyboard targets, responsive drawer 
 
 test('trash paginates using server total and purge confirms/refuses stale expected_count',async()=>{
   const {ctx,get}=harness();const calls=[],prompts=[];
-  ctx.api=async(url,opt)=>{calls.push({url,opt});if(opt)return {purged:307,files:307};return {total:307,items:[{id:calls.length,title:'Trash',tags:[]}]};};
+  ctx.api=async(url,opt)=>{calls.push({url,opt});if(opt)return {purged:307,files:307};return {total:307,revision:'trash-v1:fixture',items:[{id:calls.length,title:'Trash',tags:[]}]};};
   await ctx.loadTrash();assert.match(get('#tpurgetxt').textContent,/307/);
   await ctx.loadTrash(true);let q=new URL('http://test'+calls[1].url).searchParams;
   assert.equal(q.get('offset'),'1');assert.equal(q.get('limit'),'50');
@@ -136,6 +136,8 @@ test('trash paginates using server total and purge confirms/refuses stale expect
   await ctx.purgeTrash();assert.match(prompts[0],/307/);
   const post=calls.find(c=>c.opt?.method==='POST');assert.ok(post);
   assert.equal(new URL('http://test'+post.url).searchParams.get('expected_count'),'307');
+  assert.equal(new URL('http://test'+post.url).searchParams.get('expected_revision'),'trash-v1:fixture');
+  assert.ok(calls.some(c=>c.url==='/api/v1/trash/snapshot'));
 });
 
 test('project deletion confirms uncapped unfiltered server count and uses real project value',async()=>{
@@ -196,10 +198,19 @@ test('project navigation moves focus to a meaningful heading',async()=>{
   await ctx.nav('search');assert.equal(get('#page-title').focused,true);
 });
 
+test('purge refuses snapshots without a membership revision',async()=>{
+  const {ctx}=harness();let writes=0;const messages=[];
+  ctx.api=async(url,opt)=>{if(opt)writes++;return {total:1};};
+  ctx.confirm=()=>true;ctx.prompt=()=> '清空';ctx.toast=m=>messages.push(m);
+  await ctx.purgeTrash();
+  assert.equal(writes,0);
+  assert.match(messages[0],/无法确认回收站版本/);
+});
+
 test('purge cancellation sends no mutation; 409 refreshes count without retrying deletion',async()=>{
   for(const answer of [null,'wrong','清空']){
     const {ctx}=harness();const calls=[],messages=[];let refreshed=0;
-    ctx.api=async(url,opt)=>{calls.push({url,opt});if(opt)throw Error('HTTP 409: count changed');return {total:301,items:[]};};
+    ctx.api=async(url,opt)=>{calls.push({url,opt});if(opt)throw Error('HTTP 409: count changed');return {total:301,revision:'trash-v1:fixture',items:[]};};
     ctx.confirm=()=>true;ctx.prompt=()=>answer;ctx.toast=m=>messages.push(m);ctx.loadTrash=async()=>{refreshed++;};
     await ctx.purgeTrash();
     assert.equal(calls.filter(c=>c.opt).length,answer==='清空'?1:0);

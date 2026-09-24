@@ -1599,9 +1599,10 @@ async function purgeTrash(){
   if(S.purging || S.trashLoading) return;
   S.purging=true;$('#tpurge').disabled=true;
   try{
-    const d=await api('/api/v1/documents?trash=true&limit=1&offset=0');
+    const d=await api('/api/v1/trash/snapshot');
     const n=d.total;
     if(!n){toast('回收站是空的');await loadTrash();return;}
+    if(!d.revision){toast('无法确认回收站版本，请刷新页面后重试',1);return;}
     if(!confirm(`彻底删除回收站里的 ${n} 篇记忆？
 
 数据库记录和 .trash 里的 md 文件都会真删，界面上无法再恢复。
@@ -1609,7 +1610,7 @@ async function purgeTrash(){
     const t=prompt('确认无误请输入「清空」两个字：');
     if(t===null) return;
     if(t.trim()!=='清空'){toast('输入不匹配，已取消',1);return;}
-    const r=await api('/api/v1/trash/empty?expected_count='+n,{method:'POST'});
+    const r=await api('/api/v1/trash/empty?expected_count='+n+'&expected_revision='+encodeURIComponent(d.revision),{method:'POST'});
     toast(`已清空：${r.purged} 篇记录 / ${r.files} 个文件`);
     await Promise.all([loadTrash(),loadLibs()]);
   }catch(e){toast(e.message,1);await loadTrash();}

@@ -4,6 +4,8 @@ import logging
 import os
 import stat
 import subprocess
+import hashlib
+import json
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -419,23 +421,41 @@ async def delete_projects_query(project: str = "", unassigned: bool = False, lib
     return await delete_project(project=project, library=library, unassigned=unassigned, ctx=ctx, session=session)
 
 
+async def _trash_snapshot(session: AsyncSession, user_id: int) -> dict:
+    # Include deletion generation as well as identity: restore+delete of the same
+    # document is a new deletion the user has not confirmed (ABA protection).
+    rows = (await session.execute(select(Document.id, Document.deleted_at).where(
+        Document.user_id == user_id, Document.deleted_at.is_not(None)
+    ).order_by(Document.id))).all()
+    members = [(doc_id, stamp.isoformat()) for doc_id, stamp in rows]
+    encoded = json.dumps([user_id, members], separators=(',', ':')).encode()
+    return {'total': len(members), 'revision': 'trash-v1:' + hashlib.sha256(encoded).hexdigest()}
+
+
+@app.get("/api/v1/trash/snapshot")
+async def trash_snapshot(ctx: AuthContext = Depends(auth), session: AsyncSession = Depends(get_session)):
+    async with user_lock(ctx.user.id):
+        return await _trash_snapshot(session, ctx.user.id)
+
+
 @app.post("/api/v1/trash/empty")
 async def empty_trash(ctx: AuthContext = Depends(auth),
                       session: AsyncSession = Depends(get_session),
-                      expected_count: Annotated[int | None, Query(ge=0)] = None):
+                      expected_count: Annotated[int | None, Query(ge=0)] = None,
+                      expected_revision: str | None = None):
     """清空回收站：DB 行和 .trash/ 下的 md 都真删，不可在界面上恢复。
 
     用 POST 而不是 DELETE /api/v1/trash：这不是"删除某个资源"，
     是一个有副作用的批量动作，而且 DELETE 在有些代理/客户端上会被
     当成幂等可重试的请求。
     """
+    if not expected_revision:
+        raise HTTPException(428, "请先获取回收站快照并确认后再清空")
     async with user_lock(ctx.user.id):
-        if expected_count is not None:
-            actual = (await session.execute(select(func.count()).select_from(Document).where(
-                Document.user_id == ctx.user.id, Document.deleted_at.is_not(None)
-            ))).scalar_one()
-            if actual != expected_count:
-                raise HTTPException(409, {"message": "回收站数量已变化，请刷新后重新确认", "actualCount": actual})
+        snapshot = await _trash_snapshot(session, ctx.user.id)
+        if snapshot['revision'] != expected_revision or (
+                expected_count is not None and snapshot['total'] != expected_count):
+            raise HTTPException(409, {"message": "回收站内容已变化，请刷新后重新确认", "actualCount": snapshot['total']})
         res = await service.empty_trash(session, ctx.user)
         return {"ok": True, **res}
 

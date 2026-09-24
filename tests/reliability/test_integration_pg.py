@@ -138,6 +138,39 @@ async def verify_ready_and_mcp_readonly_tool(api_client):
     assert 'isError":true' not in r.text
 
 
+async def verify_trash_snapshot_membership(api_client):
+    c, ids, _ = api_client
+    from app.db import SessionLocal
+    from app.models import Document
+    created = []
+    for title in ['确认时的删除对象', '确认后进入回收站']:
+        r = await c.post('/api/v1/documents', json={'title': title, 'content': '隔离删除验收'})
+        assert r.status_code == 200, r.text
+        created.append(r.json()['id'])
+    first, second = created
+    assert (await c.delete(f'/api/v1/documents/{first}')).status_code == 200
+    snapshot = (await c.get('/api/v1/trash/snapshot')).json()
+    assert (await c.post(f'/api/v1/documents/{first}/restore')).status_code == 200
+    assert (await c.delete(f'/api/v1/documents/{second}')).status_code == 200
+    newer = (await c.get('/api/v1/trash/snapshot')).json()
+    assert snapshot['total'] == newer['total']
+    assert snapshot['revision'] != newer['revision']
+    stale = await c.post('/api/v1/trash/empty', params={
+        'expected_count': snapshot['total'], 'expected_revision': snapshot['revision']})
+    assert stale.status_code == 409, stale.text
+    async with SessionLocal() as s:
+        doc = await s.get(Document, second)
+        assert doc is not None and doc.deleted_at is not None
+    assert (await c.post('/api/v1/trash/empty')).status_code == 428
+    confirmed = await c.post('/api/v1/trash/empty', params={
+        'expected_count': newer['total'], 'expected_revision': newer['revision']})
+    assert confirmed.status_code == 200, confirmed.text
+    assert confirmed.json()['purged'] == newer['total']
+    async with SessionLocal() as s:
+        assert await s.get(Document, second) is None
+        assert await s.get(Document, first) is not None
+
+
 @pytest.mark.asyncio
 async def test_postgres_http_and_mcp_end_to_end(tmp_path, monkeypatch):
     # MCP task group must enter/exit in one task and may run only once per instance.
@@ -145,3 +178,4 @@ async def test_postgres_http_and_mcp_end_to_end(tmp_path, monkeypatch):
         await verify_auth_isolation_and_real_pagination(fixture)
         await verify_markdown_metadata_sync_and_conflict(fixture)
         await verify_ready_and_mcp_readonly_tool(fixture)
+        await verify_trash_snapshot_membership(fixture)

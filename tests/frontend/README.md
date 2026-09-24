@@ -1,37 +1,26 @@
-# Frontend regression / handoff
-
-Run (Node 18+; no dependencies/network/server required):
+# 前端回归与验收
 
 ```sh
 node --test tests/frontend/*.test.cjs
 ```
 
-`navigation.test.cjs` executes both real inline scripts from `app/static/index.html` in Node `vm`. A minimal DOM/fetch/timer fixture supplies browser boundaries; navigation, query construction, rendering, request races, paging, delete confirmations, save persistence warnings and boot functions are real. CSS layout, actual accessibility-tree semantics and focus geometry are **not** proven by this fixture.
+需要 Node 18+，无额外依赖。`navigation.test.cjs` 在 Node vm 中执行真实 HTML 内联脚本，使用最小 DOM/fetch/timer 夹具提供浏览器边界。覆盖导航、查询构造、渲染、请求竞态、分页、删除确认、持久化提示和自动启动；它不替代真实浏览器的 CSS、可访问性及布局验证。
 
-## Actual results
+当前结果：24 项通过、零失败。整体验收及真实 Chrome 检查见 `docs/IMPROVEMENTS.md`。
 
-- Latest execution: **22 tests, 22 passed, 0 failed**; full genuine TAP output in `latest-test-output.txt`.
-- Syntax validation: **2 inline scripts + 46 HTML event handlers compiled successfully**.
-- `git diff --check -- app/static/index.html tests/frontend`: exit 0.
-- RED was observed before each changed behavior slice (navigation; aggregate/paging/loading; debounce/mobile/boot; deletion/trash; persistence/focus; collision-free query delete and structured errors). Final extra negative/markup/startup tests audit the implemented paths.
-- This worker did not launch a browser, contact production, restart a service, change backend files or commit.
+## 接口约定
 
-## API integration
+- 总览与侧栏走 `/api/v1/projects` 全量统计，不从第一页文档推断数量。
+- `null` 表示全部；`''` 表示未归项目（`unassigned=true`）。真实项目名称按字面传输，包含 `__none__`、`未归项目`、斜杠等也不变成占位符。
+- 项目批量软删走 `DELETE /api/v1/projects?project=...` 或 `?unassigned=true`；确认数量使用完整未过滤项目总数。
+- 回收站先 GET `/api/v1/trash/snapshot` 获取 `{total,revision}`，确认并手输“清空”后提交 `POST /api/v1/trash/empty?expected_count=N&expected_revision=...`。无版本不得发送删除；428/409 显示错误，刷新回收站，不自动重试删除。revision 覆盖全部文档 ID 和删除时间，不只比较总数。
+- 普通文档保存传 `expectedRevision`；成功更新本地 revision，冲突保留编辑内容和原 revision。
+- 保存提示读取 `persistenceStatus`；Git 失败时持续显示警告，不能宣称已提交。跨分支返回 `ok:false` 或缺失 commit 时不能显示保存成功。
 
-- Overview / sidebar: `/api/v1/projects` aggregate, not an arbitrary initial document page.
-- `null` means all projects; `''` means unassigned (`unassigned=true`). Real project names, including `__none__`, `未归项目`, `（未归项目）`, `.`, `..`, slash/quote names, stay literal.
-- Project bulk deletion uses the new **`DELETE /api/v1/projects?project=...`** or `?unassigned=true` query endpoint, avoiding the legacy sentinel/path ambiguity. Confirmation freshly fetches a full unfiltered project total; label explicitly says all libraries / hidden-by-filter documents.
-- Trash purge freshly fetches `total`, requires confirm + typed 清空, then sends `POST /api/v1/trash/empty?expected_count=N`. A 409 displays `detail.message`, refreshes the trash and does not automatically repeat deletion.
-- Document save warning accepts `persistenceStatus` or `persistence_status`; failed Git state remains visible in `#save-status`, with a warning toast rather than a false commit claim.
+## 真实浏览器验收（隔离环境）
 
-## Parent browser checks (isolated test server only)
+执行 `tests/browser_smoke.py` 需专用回环测试实例、`tests/preview_auth_fixture.py` 测试身份提供者以及真实 Chrome CDP。所有浏览器写入只针对合成数据，不使用生产用户。
 
-1. Normal cached-token page startup (no manual `boot()` injection): all-documents first/selected, aggregate total over 200, folder grid present.
-2. Enter real / unassigned / placeholder-named projects; exactly one `.navitem.on`; hit “全部文档” from project/search/edit; project, q, type and library filters reset.
-3. 320 / 375 / 760 / 1280 widths, both themes: no document/toolbars horizontal overflow, long title/project truncation or wrapping, all select controls usable. No tree view.
-4. Mobile `#nav-toggle`: drawer opens, backdrop / Escape / choosing entry closes, navigation scrolls to all entries, Tab loops, focus returns appropriately. Check desktop → mobile resize too.
-5. Folder/document Enter + Space navigation; delete buttons visible on coarse-pointer/touch and keyboard focus. Deleting must not also enter the folder. Dangerous fixtures only on test server; cancel is safe.
-6. Project list `#lmore` and trash `#tmore`: 50 then next page, accurate full total, final button hidden. Inject delayed/error responses; stale requests never replace current list, retry works, failed next page preserves existing cards.
-7. Rapid title input / Chinese IME; one debounced current request, Enter immediate, changing view cancels timer. Loading / empty / error are distinct.
-8. Project deletion filtered-grid count vs actual entire project count; trash total > 50; cancellation and count-changing 409. Never run destructive cases against production data.
-9. Auth API 503 leaves token/retry available; 401 clears it. Save with Git failure displays persistent warning and saved document remains editable; subsequent successful save clears warning.
+已验证：冷登录、刷新恢复、默认全部文档、205 篇项目的50/100分页、未归项目、返回全部、真实编辑保存和 Git 提交、503重试、390/768/1440宽度与浅暗主题、零横向溢出、无Runtime异常。
+
+本次回收站集合版本补丁没有改变布局；补丁以真实 PostgreSQL HTTP 测试验证“恢复甲、删除乙而数量不变”仍拒绝旧确认，以及成功确认后仅清空当前已确认集合。前端使用真实脚本 vm 验证快照传递、取消、不自动重试和缺版本拒绝。

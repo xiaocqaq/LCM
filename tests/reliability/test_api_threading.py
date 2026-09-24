@@ -92,4 +92,7 @@ async def test_document_mutations_hold_user_lock(monkeypatch, endpoint):
         kwargs['doc_id'] = 8
     if endpoint == 'delete_project':
         kwargs['project'] = 'project'
+    if endpoint == 'empty_trash':
+        kwargs['expected_revision'] = 'trash-fixture'
+        monkeypatch.setattr(main, '_trash_snapshot', AsyncMock(return_value={'total':1,'revision':'trash-fixture'}))
     await getattr(main, endpoint)(**kwargs)
