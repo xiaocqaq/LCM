@@ -27,7 +27,8 @@ jobs:
           --health-retries 12
     env:
       MEM_ENV_FILE: ''
-      MEM_DATA_DIR: ${{ runner.temp }}/memorys-ci
+      # acceptance.sh creates its own mktemp data directory.
+      # runner context is unavailable in job-level env.
       MEM_TEST_DATABASE_URL: postgresql+asyncpg://memorys_test:disposable-ci-password@127.0.0.1:5432/memorys_test
       MEM_JWT_SECRET: disposable-ci-signing-secret-never-production
       MEM_EMBED_API_BASE: ''
