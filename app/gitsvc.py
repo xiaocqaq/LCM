@@ -20,6 +20,13 @@ def _git(repo: Path, *args: str, check: bool = True, timeout: int = 30) -> str:
     return p.stdout.strip()
 
 
+# 数据仓库自身的忽略规则。注意这里**不含** *.md —— 每篇记忆都是要版本化的正文。
+# .trash/ 必须忽略：软删除是「用户不想再看到它」，但 commit_all 用 git add -A，
+# 不忽略的话删掉的内容会照样进 git 历史，sync 再推到 GitHub 长期留存 ——
+# 用户以为删了，实际在远端还能翻出来，语义和预期相反。
+GITIGNORE_CONTENT = ".DS_Store\nThumbs.db\n*.tmp\n.trash/\n"
+
+
 def ensure_repo(data_dir: str, user_id: int) -> Path:
     root = user_root(data_dir, user_id)
     root.mkdir(parents=True, exist_ok=True)
@@ -27,8 +34,36 @@ def ensure_repo(data_dir: str, user_id: int) -> Path:
         _git(root, "init", "-b", settings.sync_branch)
         _git(root, "config", "user.name", settings.sync_identity_name)
         _git(root, "config", "user.email", settings.sync_identity_email)
-        (root / ".gitignore").write_text(".DS_Store\nThumbs.db\n*.tmp\n")
+        (root / ".gitignore").write_text(GITIGNORE_CONTENT)
+    else:
+        # 早先创建的仓库里 .gitignore 没有 .trash/ 这一行。这里补写，
+        # 否则老用户（含已上线的）继续把删除内容提交进历史 —— 只修新仓库等于没修。
+        _ensure_gitignore(root)
     return root
+
+
+def _ensure_gitignore(root: Path) -> None:
+    """把缺失的忽略规则补进已有仓库。幂等：已经是目标内容就不动文件。
+
+    刻意只在内容**缺少**某行时追加，不整体覆盖 —— 用户可能自己往 .gitignore
+    里加过东西，覆盖会静默丢掉。
+    """
+    path = root / ".gitignore"
+    try:
+        current = path.read_text(encoding="utf-8") if path.exists() else ""
+    except OSError:
+        logger.exception("读不到 .gitignore: %s", path)
+        return
+    have = {line.strip() for line in current.splitlines()}
+    missing = [line for line in GITIGNORE_CONTENT.splitlines() if line and line not in have]
+    if not missing:
+        return
+    prefix = "" if not current or current.endswith("\n") else "\n"
+    try:
+        path.write_text(current + prefix + "\n".join(missing) + "\n", encoding="utf-8")
+    except OSError:
+        logger.exception("写不进 .gitignore: %s", path)
+
 
 
 def has_changes(root: Path) -> bool:

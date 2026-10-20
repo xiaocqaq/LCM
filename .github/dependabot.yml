@@ -1,0 +1,40 @@
+# 依赖自动更新。刻意保守：
+# - 只开 monthly，避免每天 PR 刷屏（这是个人项目，不是有专职维护者的库）
+# - 不自动合并。requirements.lock 是全量固定的，自动合并等于跳过人工确认版本组合
+# - mcp 单列并限制在 1.x：MCP 协议 2.0 有 breaking change（session/tool 签名），
+#   现有 app/mcp_server.py 与 app/mcp_app.py 需要适配才能升，不能让机器人替我们决定
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+    groups:
+      # 运行时与测试依赖分开提，方便判断哪一类回归
+      runtime:
+        patterns:
+          - "fastapi*"
+          - "starlette*"
+          - "uvicorn*"
+          - "sqlalchemy*"
+          - "asyncpg*"
+          - "pgvector*"
+          - "pydantic*"
+          - "pyjwt*"
+          - "httpx*"
+          - "jieba*"
+          - "PyYAML*"
+      dev:
+        patterns:
+          - "pytest*"
+    ignore:
+      # MCP 2.x 是 breaking change，升级必须人工适配后再放开这条
+      - dependency-name: "mcp"
+        versions:
+          - ">=2"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly

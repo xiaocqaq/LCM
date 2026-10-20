@@ -1,5 +1,8 @@
 # LCM — memorys
 
+[![Isolated reliability tests](https://github.com/xiaocqaq/LCM/actions/workflows/reliability.yml/badge.svg)](https://github.com/xiaocqaq/LCM/actions/workflows/reliability.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 面向 **AI 跨会话使用** 的个人知识库 / 记忆服务。
 
 换模型、换 agent、开新会话时，从这里一次性取回项目上下文，不用重新解释一遍。

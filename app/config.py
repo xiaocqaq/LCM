@@ -13,7 +13,9 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     # 必填，见 .env.example
     database_url: str = ""
-    data_dir: str = "/var/lib/memorys"
+    # 正文与 git 仓库的根目录。默认用相对路径，避免把部署机器的绝对路径
+    # 写进公开仓库；生产由 .env 的 MEM_DATA_DIR 覆盖成真实路径。
+    data_dir: str = "./data"
     # 必填。与上游账号系统共享的 HS256 secret：本地签发的 JWT 带 iss=memorys；
     # 上游 token 无 iss，据此区分两条验证路径。
     jwt_secret: str = ""
